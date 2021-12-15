@@ -4,7 +4,6 @@ import threading
 
 from funcy import cached_property, wrap_prop
 
-from dvc.path_info import CloudURLInfo
 from dvc.scheme import Schemes
 
 from .fsspec_wrapper import ObjectFSWrapper
@@ -15,12 +14,10 @@ logger = logging.getLogger(__name__)
 # pylint:disable=abstract-method
 class OSSFileSystem(ObjectFSWrapper):
     scheme = Schemes.OSS
-    PATH_CLS = CloudURLInfo
     REQUIRES = {"ossfs": "ossfs"}
     PARAM_CHECKSUM = "etag"
     COPY_POLL_SECONDS = 5
     LIST_OBJECT_PAGE_SIZE = 100
-    DETAIL_FIELDS = frozenset(("etag", "size"))
 
     def _prepare_credentials(self, **config):
         login_info = {}

@@ -5,8 +5,9 @@ import sys
 import pytest
 from git import GitCommandError
 
-from dvc.exceptions import GitHookAlreadyExistsError
+from dvc.exceptions import DvcException
 from dvc.utils import file_md5
+from tests.func.parsing.test_errors import escape_ansi
 
 
 @pytest.mark.skipif(
@@ -17,7 +18,7 @@ class TestInstall:
         return pathlib.Path(".git") / "hooks" / name
 
     def test_create_hooks(self, scm, dvc):
-        scm.install()
+        dvc.install()
 
         hooks_with_commands = [
             ("post-checkout", "exec dvc git-hook post-checkout"),
@@ -30,16 +31,27 @@ class TestInstall:
             assert hook_path.is_file()
             assert command in hook_path.read_text()
 
-    def test_fail_if_hook_exists(self, scm):
+    def test_install_pre_commit_tool(self, scm, dvc):
+        dvc.install(use_pre_commit_tool=True)
+
+        precommit_path = pathlib.Path(".") / ".pre-commit-config.yaml"
+        assert precommit_path.is_file()
+
+    def test_fail_if_hook_exists(self, scm, dvc):
         self._hook("post-checkout").write_text("hook content")
 
-        with pytest.raises(GitHookAlreadyExistsError):
-            scm.install()
+        with pytest.raises(DvcException) as exc_info:
+            dvc.install()
+
+        assert escape_ansi(str(exc_info.value)) == (
+            "Hook 'post-checkout' already exists. "
+            "Please refer to <https://man.dvc.org/install> for more info."
+        )
 
     def test_pre_commit_hook(self, tmp_dir, scm, dvc, caplog):
         tmp_dir.dvc_gen("file", "file content", commit="create foo")
         tmp_dir.gen("file", "file modified")
-        scm.install()
+        dvc.install()
 
         # scm.commit bypasses hooks
         with pytest.raises(GitCommandError, match=r"modified:\s*file"):
@@ -48,7 +60,7 @@ class TestInstall:
     def test_post_checkout(self, tmp_dir, scm, dvc):
         tmp_dir.dvc_gen({"file": "file content"}, commit="add")
         os.unlink("file")
-        scm.install()
+        dvc.install()
 
         scm.gitpython.git.checkout("-b", "new_branch")
 
@@ -72,7 +84,7 @@ class TestInstall:
         scm.gitpython.repo.clone(os.fspath(git_remote))
         scm.gitpython.repo.create_remote("origin", os.fspath(git_remote))
 
-        scm.install()
+        dvc.install()
 
         assert not expected_storage_path.is_file()
         scm.gitpython.repo.git.push("origin", "master")
@@ -94,7 +106,7 @@ def test_merge_driver_no_ancestor(tmp_dir, scm, dvc):
 
     # installing hook only before merge, as it runs `dvc` commands which makes
     # `checkouts` and `commits` above slower
-    scm.install()
+    dvc.install()
     (tmp_dir / ".gitattributes").write_text("*.dvc merge=dvc")
 
     scm.gitpython.repo.git.merge(
@@ -131,7 +143,7 @@ def test_merge_driver(tmp_dir, scm, dvc):
 
     # installing hook only before merge, as it runs `dvc` commands on
     # `checkouts` and `commits` which slows tests down
-    scm.install()
+    dvc.install()
     (tmp_dir / ".gitattributes").write_text("*.dvc merge=dvc")
 
     scm.gitpython.repo.git.merge(

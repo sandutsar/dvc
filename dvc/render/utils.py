@@ -1,7 +1,7 @@
 import os.path
 from typing import Dict, List
 
-import dpath
+import dpath.util
 
 
 def get_files(data: Dict) -> List:
@@ -21,38 +21,25 @@ def group_by_filename(plots_data: Dict) -> List[Dict]:
     return grouped
 
 
-def find_vega(repo, plots_data, target):
-    found = dpath.util.search(plots_data, ["*", "*", target])
-    from dvc.render.vega import VegaRenderer
-
-    if found and VegaRenderer.matches(found):
-        return VegaRenderer(found, repo.plots.templates).get_vega()
-    return ""
-
-
 def match_renderers(plots_data, templates):
-    from dvc.render.image import ImageRenderer
-    from dvc.render.vega import VegaRenderer
+    from dvc.render import RENDERERS
 
     renderers = []
     for g in group_by_filename(plots_data):
-        if VegaRenderer.matches(g):
-            renderers.append(VegaRenderer(g, templates))
-        if ImageRenderer.matches(g):
-            renderers.append(ImageRenderer(g))
+        for renderer_class in RENDERERS:
+            if renderer_class.matches(g):
+                renderers.append(renderer_class(g, templates))
     return renderers
 
 
 def render(
     repo,
-    plots_data,
+    renderers,
     metrics=None,
     path=None,
     html_template_path=None,
     refresh_seconds=None,
 ):
-    # TODO we could probably remove repo usages (here and in VegaRenderer)
-    renderers = match_renderers(plots_data, repo.plots.templates)
     if not html_template_path:
         html_template_path = repo.config.get("plots", {}).get(
             "html_template", None

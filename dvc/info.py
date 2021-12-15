@@ -2,28 +2,25 @@ import itertools
 import os
 import pathlib
 import platform
-import uuid
 
 import psutil
 
-from dvc.exceptions import DvcException, NotDvcRepoError
+from dvc import __version__
+from dvc.exceptions import NotDvcRepoError
 from dvc.fs import FS_MAP, get_fs_cls, get_fs_config
+from dvc.fs.utils import test_links
 from dvc.repo import Repo
-from dvc.scm.base import SCMError
-from dvc.system import System
+from dvc.scm import SCMError
 from dvc.utils import error_link
 from dvc.utils.pkg import PKG
-from dvc.version import __version__
-
-if PKG is None:
-    package = ""
-else:
-    package = f"({PKG})"
 
 try:
     import importlib.metadata as importlib_metadata
 except ImportError:  # < 3.8
     import importlib_metadata  # type: ignore[no-redef]
+
+
+package = "" if PKG is None else f"({PKG})"
 
 
 def get_dvc_info():
@@ -76,7 +73,7 @@ def _get_caches(cache):
 
 def _get_remotes(config):
     schemes = (
-        get_fs_cls(get_fs_config(config, name=remote)).scheme
+        get_fs_cls(get_fs_config(None, config, name=remote)).scheme
         for remote in config["remote"]
     )
 
@@ -84,35 +81,17 @@ def _get_remotes(config):
 
 
 def _get_linktype_support_info(repo):
+    odb = repo.odb.local
 
-    links = {
-        "reflink": (System.reflink, None),
-        "hardlink": (System.hardlink, System.is_hardlink),
-        "symlink": (System.symlink, System.is_symlink),
-    }
+    links = test_links(
+        ["reflink", "hardlink", "symlink"],
+        odb.fs,
+        odb.fs_path,
+        repo.fs,
+        repo.root_dir,
+    )
 
-    fname = "." + str(uuid.uuid4())
-    src = os.path.join(repo.odb.local.cache_dir, fname)
-    open(src, "w").close()
-    dst = os.path.join(repo.root_dir, fname)
-
-    cache = []
-
-    for name, (link, is_link) in links.items():
-        try:
-            link(src, dst)
-            status = "supported"
-            if is_link and not is_link(dst):
-                status = "broken"
-            os.unlink(dst)
-        except DvcException:
-            status = "not supported"
-
-        if status == "supported":
-            cache.append(name)
-    os.remove(src)
-
-    return ", ".join(cache)
+    return ", ".join(links)
 
 
 def _get_supported_remotes():

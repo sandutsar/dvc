@@ -56,7 +56,7 @@ def _indexed_dir_hashes(odb, index, dir_objs, name, cache_odb):
                 tree = Tree.load(cache_odb, HashInfo(name, dir_hash))
             except FileNotFoundError:
                 continue
-        file_hashes = [entry.hash_info.value for _, entry in tree]
+        file_hashes = [oid.value for _, _, oid in tree]
         if dir_hash not in index:
             logger.debug(
                 "Indexing new .dir '%s' with '%s' nested files",
@@ -86,7 +86,7 @@ def status(
         exists: objs that exist in odb
         missing: objs that do not exist in ODB
     """
-    logger.debug("Preparing to collect status from '%s'", odb.path_info)
+    logger.debug("Preparing to collect status from '%s'", odb.fs_path)
     if not name:
         name = odb.fs.PARAM_CHECKSUM
 
@@ -102,9 +102,9 @@ def status(
                 tree = None
             else:
                 tree = Tree.load(cache_odb, hash_info)
-                for _, entry in tree:
-                    assert entry.hash_info and entry.hash_info.value
-                    hash_infos[entry.hash_info.value] = entry.hash_info
+                for _, _, oid in tree:
+                    assert oid and oid.value
+                    hash_infos[oid.value] = oid
             if index:
                 dir_objs[hash_info.value] = tree
         hash_infos[hash_info.value] = hash_info
@@ -116,7 +116,7 @@ def status(
     hashes: Set[str] = set(hash_infos.keys())
     exists: Set[str] = set()
 
-    logger.debug("Collecting status from '%s'", odb.path_info)
+    logger.debug("Collecting status from '%s'", odb.fs_path)
     if index and hashes:
         if dir_objs:
             exists = hashes.intersection(
@@ -128,9 +128,7 @@ def status(
             hashes.difference_update(exists)
 
     if hashes:
-        exists.update(
-            odb.hashes_exist(hashes, name=str(odb.path_info), **kwargs)
-        )
+        exists.update(odb.hashes_exist(hashes, name=odb.fs_path, **kwargs))
     return StatusResult(
         {hash_infos[hash_] for hash_ in exists},
         {hash_infos[hash_] for hash_ in (hashes - exists)},

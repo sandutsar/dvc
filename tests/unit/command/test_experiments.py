@@ -1,22 +1,26 @@
+import csv
+import textwrap
 from datetime import datetime
 
 import pytest
 
 from dvc.cli import parse_args
-from dvc.command.experiments import (
-    CmdExperimentsApply,
-    CmdExperimentsBranch,
-    CmdExperimentsDiff,
-    CmdExperimentsGC,
-    CmdExperimentsList,
-    CmdExperimentsPull,
-    CmdExperimentsPush,
-    CmdExperimentsRemove,
-    CmdExperimentsRun,
-    CmdExperimentsShow,
-    show_experiments,
-)
-from dvc.exceptions import InvalidArgumentError
+from dvc.command.experiments.apply import CmdExperimentsApply
+from dvc.command.experiments.branch import CmdExperimentsBranch
+from dvc.command.experiments.diff import CmdExperimentsDiff
+from dvc.command.experiments.gc import CmdExperimentsGC
+from dvc.command.experiments.init import CmdExperimentsInit
+from dvc.command.experiments.ls import CmdExperimentsList
+from dvc.command.experiments.pull import CmdExperimentsPull
+from dvc.command.experiments.push import CmdExperimentsPush
+from dvc.command.experiments.remove import CmdExperimentsRemove
+from dvc.command.experiments.run import CmdExperimentsRun
+from dvc.command.experiments.show import CmdExperimentsShow, show_experiments
+from dvc.exceptions import DvcParserError, InvalidArgumentError
+from dvc.repo import Repo
+from dvc.stage import PipelineStage
+from tests.utils import ANY
+from tests.utils.asserts import called_once_with_subset
 
 from .test_repro import default_arguments as repro_arguments
 
@@ -44,7 +48,6 @@ def test_experiments_diff(dvc, scm, mocker):
             "--param-deps",
             "--json",
             "--md",
-            "--old",
             "--precision",
             "10",
         ]
@@ -59,6 +62,29 @@ def test_experiments_diff(dvc, scm, mocker):
     m.assert_called_once_with(
         cmd.repo, a_rev="HEAD~10", b_rev="HEAD~1", all=True, param_deps=True
     )
+
+
+def test_experiments_diff_revs(mocker, capsys):
+    mocker.patch(
+        "dvc.repo.experiments.diff.diff",
+        return_value={
+            "params": {
+                "params.yaml": {"foo": {"diff": 1, "old": 1, "new": 2}}
+            },
+            "metrics": {
+                "metrics.yaml": {"foo": {"diff": 1, "old": 1, "new": 2}}
+            },
+        },
+    )
+
+    cli_args = parse_args(["exp", "diff", "exp_a", "exp_b"])
+    cmd = cli_args.func(cli_args)
+
+    capsys.readouterr()
+    assert cmd.run() == 0
+    cap = capsys.readouterr()
+    assert "exp_a" in cap.out
+    assert "exp_b" in cap.out
 
 
 def test_experiments_show(dvc, scm, mocker):
@@ -282,104 +308,121 @@ def test_experiments_remove(dvc, scm, mocker, queue, clear_all, remote):
     )
 
 
-all_experiments = {
-    "workspace": {
-        "baseline": {
-            "data": {
-                "timestamp": None,
-                "params": {
-                    "params.yaml": {
-                        "data": {
-                            "featurize": {"max_features": 3000, "ngrams": 1},
-                            "parent": 20170428,
-                            "train": {
-                                "n_est": 100,
-                                "min_split": 36,
-                            },
+def test_show_experiments_csv(capsys):
+    all_experiments = {
+        "workspace": {
+            "baseline": {
+                "data": {
+                    "timestamp": None,
+                    "params": {
+                        "params.yaml": {
+                            "data": {
+                                "featurize": {
+                                    "max_features": 3000,
+                                    "ngrams": 1,
+                                },
+                                "parent": 20170428,
+                                "train": {
+                                    "n_est": 100,
+                                    "min_split": 36,
+                                },
+                            }
                         }
-                    }
-                },
-                "queued": False,
-                "running": False,
-                "executor": None,
-                "metrics": {
-                    "scores.json": {
-                        "data": {
-                            "featurize": {"max_features": 3000, "ngrams": 1},
-                            "avg_prec": 0.5843640011189556,
-                            "roc_auc": 0.9544670443829399,
+                    },
+                    "queued": False,
+                    "running": False,
+                    "executor": None,
+                    "metrics": {
+                        "scores.json": {
+                            "data": {
+                                "featurize": {
+                                    "max_features": 3000,
+                                    "ngrams": 1,
+                                },
+                                "avg_prec": 0.5843640011189556,
+                                "roc_auc": 0.9544670443829399,
+                            }
                         }
-                    }
-                },
-            }
-        }
-    },
-    "b05eecc666734e899f79af228ff49a7ae5a18cc0": {
-        "baseline": {
-            "data": {
-                "timestamp": datetime(2021, 8, 2, 16, 48, 14),
-                "params": {
-                    "params.yaml": {
-                        "data": {
-                            "featurize": {"max_features": 3000, "ngrams": 1},
-                            "parent": 20170428,
-                            "train": {
-                                "n_est": 100,
-                                "min_split": 2,
-                            },
-                        }
-                    }
-                },
-                "queued": False,
-                "running": False,
-                "executor": None,
-                "metrics": {
-                    "scores.json": {
-                        "data": {
-                            "featurize": {"max_features": 3000, "ngrams": 1},
-                            "avg_prec": 0.5325162867864254,
-                            "roc_auc": 0.9106964878520005,
-                        }
-                    }
-                },
-                "name": "master",
+                    },
+                }
             }
         },
-        "ae99936461d6c3092934160f8beafe66a294f98d": {
-            "data": {
-                "timestamp": datetime(2021, 8, 31, 14, 56, 55),
-                "params": {
-                    "params.yaml": {
-                        "data": {
-                            "featurize": {"max_features": 3000, "ngrams": 1},
-                            "parent": 20170428,
-                            "train": {
-                                "n_est": 100,
-                                "min_split": 36,
-                            },
+        "b05eecc666734e899f79af228ff49a7ae5a18cc0": {
+            "baseline": {
+                "data": {
+                    "timestamp": datetime(2021, 8, 2, 16, 48, 14),
+                    "params": {
+                        "params.yaml": {
+                            "data": {
+                                "featurize": {
+                                    "max_features": 3000,
+                                    "ngrams": 1,
+                                },
+                                "parent": 20170428,
+                                "train": {
+                                    "n_est": 100,
+                                    "min_split": 2,
+                                },
+                            }
                         }
-                    }
-                },
-                "queued": True,
-                "running": True,
-                "executor": None,
-                "metrics": {
-                    "scores.json": {
-                        "data": {
-                            "featurize": {"max_features": 3000, "ngrams": 1},
-                            "avg_prec": 0.5843640011189556,
-                            "roc_auc": 0.9544670443829399,
+                    },
+                    "queued": False,
+                    "running": False,
+                    "executor": None,
+                    "metrics": {
+                        "scores.json": {
+                            "data": {
+                                "featurize": {
+                                    "max_features": 3000,
+                                    "ngrams": 1,
+                                },
+                                "avg_prec": 0.5325162867864254,
+                                "roc_auc": 0.9106964878520005,
+                            }
                         }
-                    }
-                },
-                "name": "exp-44136",
-            }
+                    },
+                    "name": "master",
+                }
+            },
+            "ae99936461d6c3092934160f8beafe66a294f98d": {
+                "data": {
+                    "timestamp": datetime(2021, 8, 31, 14, 56, 55),
+                    "params": {
+                        "params.yaml": {
+                            "data": {
+                                "featurize": {
+                                    "max_features": 3000,
+                                    "ngrams": 1,
+                                },
+                                "parent": 20170428,
+                                "train": {
+                                    "n_est": 100,
+                                    "min_split": 36,
+                                },
+                            }
+                        }
+                    },
+                    "queued": True,
+                    "running": True,
+                    "executor": None,
+                    "metrics": {
+                        "scores.json": {
+                            "data": {
+                                "featurize": {
+                                    "max_features": 3000,
+                                    "ngrams": 1,
+                                },
+                                "avg_prec": 0.5843640011189556,
+                                "roc_auc": 0.9544670443829399,
+                            }
+                        }
+                    },
+                    "name": "exp-44136",
+                }
+            },
         },
-    },
-}
+    }
 
-
-def test_show_experiments(capsys):
     show_experiments(
         all_experiments, precision=None, fill_value="", iso=True, csv=True
     )
@@ -405,3 +448,313 @@ def test_show_experiments(capsys):
         "3000,1,0.5843640011189556,0.9544670443829399,3000,1,20170428,100,36"
         in cap.out
     )
+
+
+def test_show_experiments_md(capsys):
+    all_experiments = {
+        "workspace": {
+            "baseline": {
+                "data": {
+                    "timestamp": None,
+                    "params": {"params.yaml": {"data": {"foo": 1}}},
+                    "queued": False,
+                    "running": False,
+                    "executor": None,
+                    "metrics": {
+                        "scores.json": {"data": {"bar": 0.9544670443829399}}
+                    },
+                }
+            }
+        },
+    }
+    show_experiments(
+        all_experiments, precision=None, fill_value="", iso=True, markdown=True
+    )
+    cap = capsys.readouterr()
+
+    assert cap.out == textwrap.dedent(
+        """\
+        | Experiment   | Created   | bar                | foo   |
+        |--------------|-----------|--------------------|-------|
+        | workspace    |           | 0.9544670443829399 | 1     |\n
+    """
+    )
+
+
+@pytest.mark.parametrize("sort_order", ["asc", "desc"])
+def test_show_experiments_sort_by(capsys, sort_order):
+    sort_experiments = {
+        "workspace": {
+            "baseline": {
+                "data": {
+                    "timestamp": None,
+                    "params": {
+                        "params.yaml": {
+                            "data": {
+                                "foo": 1,
+                            }
+                        }
+                    },
+                    "queued": False,
+                    "running": False,
+                    "executor": None,
+                    "metrics": {},
+                }
+            }
+        },
+        "233b132676792d89e848e5c9c12e408d7efde78a": {
+            "baseline": {
+                "data": {
+                    "timestamp": datetime(2021, 8, 2, 16, 48, 14),
+                    "params": {
+                        "params.yaml": {
+                            "data": {
+                                "foo": 0,
+                            }
+                        }
+                    },
+                    "queued": False,
+                    "running": False,
+                    "executor": None,
+                    "metrics": {},
+                    "name": "master",
+                }
+            },
+            "fad0a94": {
+                "data": {
+                    "timestamp": datetime(2021, 8, 31, 14, 56, 55),
+                    "params": {
+                        "params.yaml": {
+                            "data": {
+                                "foo": 1,
+                            }
+                        }
+                    },
+                    "queued": False,
+                    "running": False,
+                    "executor": None,
+                    "metrics": {},
+                    "name": "exp-89140",
+                }
+            },
+            "60fcda8": {
+                "data": {
+                    "timestamp": datetime(2021, 8, 31, 14, 56, 55),
+                    "params": {
+                        "params.yaml": {
+                            "data": {
+                                "foo": 2,
+                            }
+                        }
+                    },
+                    "queued": False,
+                    "running": False,
+                    "executor": None,
+                    "metrics": {},
+                    "name": "exp-43537",
+                }
+            },
+            "a7e9aaf": {
+                "data": {
+                    "timestamp": datetime(2021, 8, 31, 14, 56, 55),
+                    "params": {
+                        "params.yaml": {
+                            "data": {
+                                "foo": 0,
+                            }
+                        }
+                    },
+                    "queued": False,
+                    "running": False,
+                    "executor": None,
+                    "metrics": {},
+                    "name": "exp-4f89e",
+                }
+            },
+        },
+    }
+
+    show_experiments(
+        sort_experiments,
+        precision=None,
+        fill_value="",
+        iso=True,
+        csv=True,
+        sort_by="foo",
+        sort_order=sort_order,
+    )
+
+    cap = capsys.readouterr()
+    rows = list(csv.reader(cap.out.strip().split("\n")))
+    # [3:] To skip header, workspace and baseline(master)
+    # which are not affected by order
+    params = tuple([int(row[-1]) for row in rows[3:]])
+
+    if sort_order == "asc":
+        assert params == (0, 1, 2)
+    else:
+        assert params == (2, 1, 0)
+
+
+@pytest.mark.parametrize("extra_args", [(), ("--run",)])
+def test_experiments_init(dvc, scm, mocker, capsys, extra_args):
+    m = mocker.patch(
+        "dvc.repo.experiments.init.init",
+        return_value=PipelineStage(dvc, path="dvc.yaml", name="stage1"),
+    )
+    runner = mocker.patch("dvc.repo.experiments.run.run", return_value=0)
+    cli_args = parse_args(["exp", "init", *extra_args, "cmd"])
+    cmd = cli_args.func(cli_args)
+
+    assert isinstance(cmd, CmdExperimentsInit)
+    assert cmd.run() == 0
+    m.assert_called_once_with(
+        ANY(Repo),
+        name="train",
+        type="default",
+        defaults={
+            "code": "src",
+            "models": "models",
+            "data": "data",
+            "metrics": "metrics.json",
+            "params": "params.yaml",
+            "plots": "plots",
+            "live": "dvclive",
+        },
+        overrides={"cmd": "cmd"},
+        interactive=False,
+        force=False,
+    )
+    expected = "Created train stage in dvc.yaml."
+    if not extra_args:
+        expected += (
+            ' To run, use "dvc exp run".\n' "See https://s.dvc.org/g/exp/run."
+        )
+    assert capsys.readouterr() == (expected + "\n", "")
+    if extra_args:
+        # `parse_args` creates a new `Repo` object
+        runner.assert_called_once_with(ANY(Repo), targets=["stage1"])
+
+
+def test_experiments_init_config(dvc, scm, mocker):
+    with dvc.config.edit() as conf:
+        conf["exp"] = {"code": "new_src", "models": "new_models"}
+
+    m = mocker.patch("dvc.repo.experiments.init.init")
+    cli_args = parse_args(["exp", "init", "cmd"])
+    cmd = cli_args.func(cli_args)
+
+    assert isinstance(cmd, CmdExperimentsInit)
+    assert cmd.run() == 0
+    m.assert_called_once_with(
+        ANY(Repo),
+        name="train",
+        type="default",
+        defaults={
+            "code": "new_src",
+            "models": "new_models",
+            "data": "data",
+            "metrics": "metrics.json",
+            "params": "params.yaml",
+            "plots": "plots",
+            "live": "dvclive",
+        },
+        overrides={"cmd": "cmd"},
+        interactive=False,
+        force=False,
+    )
+
+
+def test_experiments_init_explicit(dvc, mocker):
+    m = mocker.patch("dvc.repo.experiments.init.init")
+    cli_args = parse_args(["exp", "init", "--explicit", "cmd"])
+    cmd = cli_args.func(cli_args)
+
+    assert cmd.run() == 0
+    m.assert_called_once_with(
+        ANY(Repo),
+        name="train",
+        type="default",
+        defaults={},
+        overrides={"cmd": "cmd"},
+        interactive=False,
+        force=False,
+    )
+
+
+def test_experiments_init_cmd_required_for_non_interactive_mode(dvc):
+    cli_args = parse_args(["exp", "init"])
+    cmd = cli_args.func(cli_args)
+    assert isinstance(cmd, CmdExperimentsInit)
+
+    with pytest.raises(InvalidArgumentError) as exc:
+        cmd.run()
+    assert str(exc.value) == "command is not specified"
+
+
+def test_experiments_init_cmd_not_required_for_interactive_mode(dvc, mocker):
+    cli_args = parse_args(["exp", "init", "--interactive"])
+    cmd = cli_args.func(cli_args)
+    assert isinstance(cmd, CmdExperimentsInit)
+
+    m = mocker.patch("dvc.repo.experiments.init.init")
+    assert cmd.run() == 0
+    assert called_once_with_subset(m, ANY(Repo), interactive=True)
+
+
+@pytest.mark.parametrize(
+    "extra_args, expected_kw",
+    [
+        (["--type", "default"], {"type": "default", "name": "train"}),
+        (["--type", "dl"], {"type": "dl", "name": "train"}),
+        (["--force"], {"force": True, "name": "train"}),
+        (
+            ["--name", "name", "--type", "dl"],
+            {"name": "name", "type": "dl"},
+        ),
+        (
+            [
+                "--plots",
+                "p",
+                "--models",
+                "m",
+                "--code",
+                "c",
+                "--metrics",
+                "m.json",
+                "--params",
+                "p.yaml",
+                "--data",
+                "d",
+                "--live",
+                "live",
+            ],
+            {
+                "name": "train",
+                "overrides": {
+                    "plots": "p",
+                    "models": "m",
+                    "code": "c",
+                    "metrics": "m.json",
+                    "params": "p.yaml",
+                    "data": "d",
+                    "live": "live",
+                    "cmd": "cmd",
+                },
+            },
+        ),
+    ],
+)
+def test_experiments_init_extra_args(extra_args, expected_kw, mocker):
+    cli_args = parse_args(["exp", "init", *extra_args, "cmd"])
+    cmd = cli_args.func(cli_args)
+    assert isinstance(cmd, CmdExperimentsInit)
+
+    m = mocker.patch("dvc.repo.experiments.init.init")
+    assert cmd.run() == 0
+    assert called_once_with_subset(m, ANY(Repo), **expected_kw)
+
+
+def test_experiments_init_type_invalid_choice():
+    with pytest.raises(DvcParserError):
+        parse_args(["exp", "init", "--type=invalid", "cmd"])

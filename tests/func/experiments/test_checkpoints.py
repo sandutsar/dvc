@@ -10,7 +10,7 @@ from dvc.repo.experiments import MultipleBranchError
 from dvc.repo.experiments.base import EXEC_APPLY, EXEC_CHECKPOINT
 from dvc.repo.experiments.executor.base import BaseExecutor
 from dvc.repo.experiments.utils import exp_refs_by_rev
-from dvc.scm.base import InvalidRemoteSCMRepo
+from dvc.scm import InvalidRemoteSCMRepo
 
 
 @pytest.mark.parametrize("workspace", [True, False])
@@ -32,9 +32,9 @@ def test_new_checkpoint(
         if rev == "workspace":
             continue
         fs = dvc.repo_fs
-        with fs.open(tmp_dir / "foo") as fobj:
+        with fs.open((tmp_dir / "foo").fs_path) as fobj:
             assert fobj.read().strip() == str(checkpoint_stage.iterations)
-        with fs.open(tmp_dir / "metrics.yaml") as fobj:
+        with fs.open((tmp_dir / "metrics.yaml").fs_path) as fobj:
             assert fobj.read().strip() == "foo: 2"
 
     if workspace:
@@ -81,9 +81,9 @@ def test_resume_checkpoint(
         if rev == "workspace":
             continue
         fs = dvc.repo_fs
-        with fs.open(tmp_dir / "foo") as fobj:
+        with fs.open((tmp_dir / "foo").fs_path) as fobj:
             assert fobj.read().strip() == str(2 * checkpoint_stage.iterations)
-        with fs.open(tmp_dir / "metrics.yaml") as fobj:
+        with fs.open((tmp_dir / "metrics.yaml").fs_path) as fobj:
             assert fobj.read().strip() == "foo: 2"
 
     if workspace:
@@ -112,9 +112,9 @@ def test_reset_checkpoint(
         if rev == "workspace":
             continue
         fs = dvc.repo_fs
-        with fs.open(tmp_dir / "foo") as fobj:
+        with fs.open((tmp_dir / "foo").fs_path) as fobj:
             assert fobj.read().strip() == str(checkpoint_stage.iterations)
-        with fs.open(tmp_dir / "metrics.yaml") as fobj:
+        with fs.open((tmp_dir / "metrics.yaml").fs_path) as fobj:
             assert fobj.read().strip() == "foo: 2"
 
     if workspace:
@@ -151,18 +151,18 @@ def test_resume_branch(tmp_dir, scm, dvc, checkpoint_stage, workspace):
         if rev == "workspace":
             continue
         fs = dvc.repo_fs
-        with fs.open(tmp_dir / "foo") as fobj:
+        with fs.open((tmp_dir / "foo").fs_path) as fobj:
             assert fobj.read().strip() == str(2 * checkpoint_stage.iterations)
-        with fs.open(tmp_dir / "metrics.yaml") as fobj:
+        with fs.open((tmp_dir / "metrics.yaml").fs_path) as fobj:
             assert fobj.read().strip() == "foo: 2"
 
     for rev in dvc.brancher([checkpoint_b]):
         if rev == "workspace":
             continue
         fs = dvc.repo_fs
-        with fs.open(tmp_dir / "foo") as fobj:
+        with fs.open((tmp_dir / "foo").fs_path) as fobj:
             assert fobj.read().strip() == str(2 * checkpoint_stage.iterations)
-        with fs.open(tmp_dir / "metrics.yaml") as fobj:
+        with fs.open((tmp_dir / "metrics.yaml").fs_path) as fobj:
             assert fobj.read().strip() == "foo: 100"
 
     with pytest.raises(MultipleBranchError):
@@ -219,7 +219,7 @@ def test_auto_push_during_iterations(
 ):
     # set up remote repo
     remote = git_upstream.url if use_url else git_upstream.remote
-    git_upstream.scm.fetch_refspecs(str(tmp_dir), ["master:master"])
+    git_upstream.tmp_dir.scm.fetch_refspecs(str(tmp_dir), ["master:master"])
     monkeypatch.setenv(DVC_EXP_GIT_REMOTE, remote)
     auto_push_spy = mocker.spy(BaseExecutor, "_auto_push")
 
@@ -233,7 +233,7 @@ def test_auto_push_during_iterations(
     assert (tmp_dir / "foo").read_text() == "4"
     exp = first(results)
     ref_info = first(exp_refs_by_rev(scm, exp))
-    assert git_upstream.scm.get_ref(str(ref_info)) == exp
+    assert git_upstream.tmp_dir.scm.get_ref(str(ref_info)) == exp
 
     assert auto_push_spy.call_count == 2
     assert auto_push_spy.call_args[0][2] == remote

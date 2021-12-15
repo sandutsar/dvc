@@ -12,6 +12,7 @@ from typing import (
     Mapping,
     MutableSequence,
     Sequence,
+    Set,
     Tuple,
     Union,
     overload,
@@ -115,6 +116,8 @@ class TabularData(MutableSequence[Sequence["CellT"]]):
             del col[item]
 
     def __len__(self) -> int:
+        if not self._columns:
+            return 0
         return len(self.columns[0])
 
     @property
@@ -181,6 +184,86 @@ class TabularData(MutableSequence[Sequence["CellT"]]):
             {k: self._columns[k][i] for k in keys} for i in range(len(self))
         ]
 
+    def dropna(self, axis: str = "rows", how="any"):
+        if axis not in ["rows", "cols"]:
+            raise ValueError(
+                f"Invalid 'axis' value {axis}."
+                "Choose one of ['rows', 'cols']"
+            )
+        if how not in ["any", "all"]:
+            raise ValueError(
+                f"Invalid 'how' value {how}." "Choose one of ['any', 'all']"
+            )
+
+        match_line: Set = set()
+        match = True
+        if how == "all":
+            match = False
+
+        for n_row, row in enumerate(self):
+            for n_col, col in enumerate(row):
+                if (col == self._fill_value) is match:
+                    if axis == "rows":
+                        match_line.add(n_row)
+                        break
+                    else:
+                        match_line.add(self.keys()[n_col])
+
+        to_drop = match_line
+        if how == "all":
+            if axis == "rows":
+                to_drop = set(range(len(self)))
+            else:
+                to_drop = set(self.keys())
+            to_drop -= match_line
+
+        if axis == "rows":
+            for name in self.keys():
+                self._columns[name] = Column(
+                    [
+                        x
+                        for n, x in enumerate(self._columns[name])
+                        if n not in to_drop
+                    ]
+                )
+        else:
+            self.drop(*to_drop)
+
+    def drop_duplicates(self, axis: str = "rows"):
+        if axis not in ["rows", "cols"]:
+            raise ValueError(
+                f"Invalid 'axis' value {axis}."
+                "Choose one of ['rows', 'cols']"
+            )
+
+        if axis == "cols":
+            cols_to_drop: List[str] = []
+            for n_col, col in enumerate(self.columns):
+                # Cast to str because Text is not hashable error
+                unique_vals = {str(x) for x in col if x != self._fill_value}
+                if len(unique_vals) == 1:
+                    cols_to_drop.append(self.keys()[n_col])
+            self.drop(*cols_to_drop)
+
+        elif axis == "rows":
+            unique_rows = []
+            rows_to_drop: List[int] = []
+            for n_row, row in enumerate(self):
+                tuple_row = tuple(row)
+                if tuple_row in unique_rows:
+                    rows_to_drop.append(n_row)
+                else:
+                    unique_rows.append(tuple_row)
+
+            for name in self.keys():
+                self._columns[name] = Column(
+                    [
+                        x
+                        for n, x in enumerate(self._columns[name])
+                        if n not in rows_to_drop
+                    ]
+                )
+
 
 def _normalize_float(val: float, precision: int):
     return f"{val:.{precision}g}"
@@ -211,8 +294,12 @@ def diff_table(
     precision: int = None,
     round_digits: bool = False,
     on_empty_diff: str = None,
+    a_rev: str = None,
+    b_rev: str = None,
 ) -> TabularData:
-    headers: List[str] = ["Path", title, "Old", "New", "Change"]
+    a_rev = a_rev or "HEAD"
+    b_rev = b_rev or "workspace"
+    headers: List[str] = ["Path", title, a_rev, b_rev, "Change"]
     fill_value = "-"
     td = TabularData(headers, fill_value=fill_value)
 
@@ -240,8 +327,8 @@ def diff_table(
         td.drop("Change")
 
     if not old:
-        td.drop("Old")
-        td.rename("New", "Value")
+        td.drop(a_rev)
+        td.rename(b_rev, "Value")
 
     return td
 
@@ -256,6 +343,8 @@ def show_diff(
     round_digits: bool = False,
     on_empty_diff: str = None,
     markdown: bool = False,
+    a_rev: str = None,
+    b_rev: str = None,
 ) -> None:
     td = diff_table(
         diff,
@@ -266,6 +355,8 @@ def show_diff(
         precision=precision,
         round_digits=round_digits,
         on_empty_diff=on_empty_diff,
+        a_rev=a_rev,
+        b_rev=b_rev,
     )
     td.render(markdown=markdown)
 

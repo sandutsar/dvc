@@ -20,6 +20,7 @@ def _id_gen(val) -> str:
         (["experiments", "diff", "--show-md"], "markdown"),
         (["experiments", "show", "--show-json"], "json"),
         (["experiments", "show", "--show-csv"], "csv"),
+        (["experiments", "show", "--show-md"], "markdown"),
         (["ls", "--show-json", "."], "json"),
         (["metrics", "diff", "--show-json"], "json"),
         (["metrics", "diff", "--show-md"], "markdown"),
@@ -28,6 +29,8 @@ def _id_gen(val) -> str:
         (["params", "diff", "--show-json"], "json"),
         (["params", "diff", "--show-md"], "markdown"),
         (["status", "--show-json"], "json"),
+        (["plots", "show", "--show-json"], "json"),
+        (["plots", "diff", "--show-json"], "json"),
     ],
     ids=_id_gen,
 )

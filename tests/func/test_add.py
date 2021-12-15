@@ -34,6 +34,7 @@ from dvc.stage.exceptions import (
     StagePathNotFoundError,
 )
 from dvc.system import System
+from dvc.testing.test_workspace import TestAdd
 from dvc.utils import LARGE_DIR_SIZE, file_md5, relpath
 from dvc.utils.fs import path_isin
 from dvc.utils.serialize import YAMLFileCorruptedError, load_yaml
@@ -87,7 +88,7 @@ def test_add_executable(tmp_dir, dvc):
 
 
 def test_add_unicode(tmp_dir, dvc):
-    with open("\xe1", "wb") as fd:
+    with open("\xe1", "wb", encoding=None) as fd:
         fd.write(b"something")
 
     (stage,) = dvc.add("\xe1")
@@ -112,7 +113,7 @@ def test_add_directory(tmp_dir, dvc):
     hash_info = stage.outs[0].hash_info
 
     obj = load(dvc.odb.local, hash_info)
-    for key, _ in obj:
+    for key, _, _ in obj:
         for part in key:
             assert "\\" not in part
 
@@ -143,7 +144,7 @@ class TestAddCmdDirectoryRecursive(TestDvc):
         # Create a lot of files
         for iteration in range(LARGE_DIR_SIZE + 1):
             path = os.path.join("large-dir", str(iteration))
-            with open(path, "w") as fobj:
+            with open(path, "w", encoding="utf-8") as fobj:
                 fobj.write(path)
 
         assert main(["add", "--recursive", "large-dir"]) == 0
@@ -291,59 +292,18 @@ def test_add_filtered_files_in_dir(
         assert stage.outs[0].def_path in expected_def_paths
 
 
-@pytest.mark.parametrize(
-    "workspace, hash_name, hash_value",
-    [
-        (
-            pytest.lazy_fixture("local_cloud"),
-            "md5",
-            "8c7dd922ad47494fc02c388e12c00eac",
-        ),
-        pytest.param(
-            pytest.lazy_fixture("ssh"),
-            "md5",
-            "8c7dd922ad47494fc02c388e12c00eac",
-            marks=pytest.mark.skipif(
-                os.name == "nt", reason="disabled on windows"
-            ),
-        ),
-        (
-            pytest.lazy_fixture("s3"),
-            "etag",
-            "8c7dd922ad47494fc02c388e12c00eac",
-        ),
-        (
-            pytest.lazy_fixture("hdfs"),
-            "checksum",
-            "000002000000000000000000a86fe4d846edc1bf4c355cb6112f141e",
-        ),
-        (
-            pytest.lazy_fixture("webhdfs"),
-            "checksum",
-            "000002000000000000000000a86fe4d846edc1bf4c355cb6112f141e00000000",
-        ),
-    ],
-    indirect=["workspace"],
-)
-def test_add_external_file(tmp_dir, dvc, workspace, hash_name, hash_value):
-    workspace.gen("file", "file")
+class TestAddExternal(TestAdd):
+    @pytest.fixture
+    def hash_name(self):
+        return "md5"
 
-    with pytest.raises(StageExternalOutputsError):
-        dvc.add(workspace.url)
+    @pytest.fixture
+    def hash_value(self):
+        return "8c7dd922ad47494fc02c388e12c00eac"
 
-    dvc.add("remote://workspace/file")
-    assert (tmp_dir / "file.dvc").read_text() == (
-        "outs:\n"
-        f"- {hash_name}: {hash_value}\n"
-        "  size: 4\n"
-        "  path: remote://workspace/file\n"
-    )
-    assert (workspace / "file").read_text() == "file"
-    assert (
-        workspace / "cache" / hash_value[:2] / hash_value[2:]
-    ).read_text() == "file"
-
-    assert dvc.status() == {}
+    @pytest.fixture
+    def dir_hash_value(self):
+        return "b6dcab6ccd17ca0a8bf4a215a37d14cc.dir"
 
 
 def test_add_external_relpath(tmp_dir, dvc, local_cloud):
@@ -362,44 +322,6 @@ def test_add_external_relpath(tmp_dir, dvc, local_cloud):
     )
     assert fpath.read_text() == "file"
     assert dvc.status() == {}
-
-
-@pytest.mark.parametrize(
-    "workspace, hash_name, hash_value",
-    [
-        (
-            pytest.lazy_fixture("local_cloud"),
-            "md5",
-            "b6dcab6ccd17ca0a8bf4a215a37d14cc.dir",
-        ),
-        pytest.param(
-            pytest.lazy_fixture("ssh"),
-            "md5",
-            "b6dcab6ccd17ca0a8bf4a215a37d14cc.dir",
-            marks=pytest.mark.skipif(
-                os.name == "nt", reason="disabled on windows"
-            ),
-        ),
-        (
-            pytest.lazy_fixture("s3"),
-            "etag",
-            "ec602a6ba97b2dd07bd6d2cd89674a60.dir",
-        ),
-    ],
-    indirect=["workspace"],
-)
-def test_add_external_dir(tmp_dir, dvc, workspace, hash_name, hash_value):
-    workspace.gen({"dir": {"file": "file", "subdir": {"subfile": "subfile"}}})
-
-    dvc.add("remote://workspace/dir")
-    assert (tmp_dir / "dir.dvc").read_text() == (
-        "outs:\n"
-        f"- {hash_name}: {hash_value}\n"
-        "  size: 11\n"
-        "  nfiles: 2\n"
-        "  path: remote://workspace/dir\n"
-    )
-    assert (workspace / "cache" / hash_value[:2] / hash_value[2:]).is_file()
 
 
 class TestAddLocalRemoteFile(TestDvc):
@@ -496,27 +418,27 @@ def test_should_update_state_entry_for_directory_after_add(
 
     ret = main(["add", "data"])
     assert ret == 0
-    assert file_md5_counter.mock.call_count == 4
+    assert file_md5_counter.mock.call_count == 3
 
     ret = main(["status"])
     assert ret == 0
-    assert file_md5_counter.mock.call_count == 4
+    assert file_md5_counter.mock.call_count == 3
 
     ls = "dir" if os.name == "nt" else "ls"
     ret = main(
         ["run", "--single-stage", "-d", "data", "{} {}".format(ls, "data")]
     )
     assert ret == 0
-    assert file_md5_counter.mock.call_count == 4
+    assert file_md5_counter.mock.call_count == 3
 
     os.rename("data", "data" + ".back")
     ret = main(["checkout"])
     assert ret == 0
-    assert file_md5_counter.mock.call_count == 4
+    assert file_md5_counter.mock.call_count == 3
 
     ret = main(["status"])
     assert ret == 0
-    assert file_md5_counter.mock.call_count == 4
+    assert file_md5_counter.mock.call_count == 3
 
 
 class TestAddCommit(TestDvc):
@@ -534,18 +456,18 @@ class TestAddCommit(TestDvc):
 
 def test_should_collect_dir_cache_only_once(mocker, tmp_dir, dvc):
     tmp_dir.gen({"data/data": "foo"})
-    counter = mocker.spy(dvc_module.objects.stage, "_get_tree_obj")
+    counter = mocker.spy(dvc_module.objects.stage, "_stage_tree")
     ret = main(["add", "data"])
     assert ret == 0
-    assert counter.mock.call_count == 2
+    assert counter.mock.call_count == 1
 
     ret = main(["status"])
     assert ret == 0
-    assert counter.mock.call_count == 2
+    assert counter.mock.call_count == 1
 
     ret = main(["status"])
     assert ret == 0
-    assert counter.mock.call_count == 2
+    assert counter.mock.call_count == 1
 
 
 class TestShouldPlaceStageInDataDirIfRepositoryBelowSymlink(TestDvc):
@@ -581,7 +503,7 @@ class TestShouldThrowProperExceptionOnCorruptedStageFile(TestDvc):
         foo_stage = relpath(self.FOO + DVC_FILE_SUFFIX)
 
         # corrupt stage file
-        with open(foo_stage, "a+") as file:
+        with open(foo_stage, "a+", encoding="utf-8") as file:
             file.write("this will break yaml file structure")
 
         self._caplog.clear()
@@ -677,8 +599,12 @@ def temporary_windows_drive(tmp_path_factory):
     import string
     from ctypes import windll
 
-    import win32api  # pylint: disable=import-error
-    from win32con import DDD_REMOVE_DEFINITION  # pylint: disable=import-error
+    try:
+        # pylint: disable=import-error
+        import win32api
+        from win32con import DDD_REMOVE_DEFINITION
+    except ImportError:
+        pytest.skip("pywin32 not installed")
 
     drives = [
         s[0].upper()
@@ -766,14 +692,14 @@ def test_should_not_checkout_when_adding_cached_copy(tmp_dir, dvc, mocker):
 def test_should_relink_on_repeated_add(
     link, new_link, link_test_func, tmp_dir, dvc
 ):
-    from dvc.path_info import PathInfo
-
     dvc.config["cache"]["type"] = link
 
     tmp_dir.dvc_gen({"foo": "foo", "bar": "bar"})
 
     os.remove("foo")
-    getattr(dvc.odb.local.fs, link)(PathInfo("bar"), PathInfo("foo"))
+    getattr(dvc.odb.local.fs, link)(
+        (tmp_dir / "bar").fs_path, (tmp_dir / "foo").fs_path
+    )
 
     dvc.odb.local.cache_types = [new_link]
 
@@ -818,6 +744,7 @@ def test_escape_gitignore_entries(tmp_dir, scm, dvc):
     assert ignored_fname in get_gitignore_content()
 
 
+@pytest.mark.xfail(reason="error message relpath")
 def test_add_from_data_dir(tmp_dir, scm, dvc):
     tmp_dir.dvc_gen({"dir": {"file1": "file1 content"}})
 
@@ -856,16 +783,16 @@ def test_add_optimization_for_hardlink_on_empty_files(tmp_dir, dvc, mocker):
     m = mocker.spy(LocalFileSystem, "is_hardlink")
     stages = dvc.add(["foo", "bar", "lorem", "ipsum"])
 
-    assert m.call_count == 1
+    assert m.call_count == 4
     assert m.call_args != call(tmp_dir / "foo")
     assert m.call_args != call(tmp_dir / "bar")
 
     for stage in stages[:2]:
         # hardlinks are not created for empty files
-        assert not System.is_hardlink(stage.outs[0].path_info)
+        assert not System.is_hardlink(stage.outs[0].fs_path)
 
     for stage in stages[2:]:
-        assert System.is_hardlink(stage.outs[0].path_info)
+        assert System.is_hardlink(stage.outs[0].fs_path)
 
     for stage in stages:
         assert os.path.exists(stage.path)
@@ -953,14 +880,14 @@ def test_add_with_cache_link_error(tmp_dir, dvc, mocker, capsys):
     tmp_dir.gen("foo", "foo")
 
     mocker.patch(
-        "dvc.objects.checkout._do_link",
-        side_effect=DvcException("link failed"),
+        "dvc.objects.checkout.test_links",
+        return_value=[],
     )
     dvc.add("foo")
     err = capsys.readouterr()[1]
     assert "reconfigure cache types" in err
 
-    assert not (tmp_dir / "foo").exists()
+    assert (tmp_dir / "foo").exists()
     assert (tmp_dir / "foo.dvc").exists()
     assert (tmp_dir / ".dvc" / "cache").read_text() == {
         "ac": {"bd18db4cc2f85cedef654fccc4a4d8": "foo"}
@@ -999,7 +926,7 @@ def test_add_preserve_meta(tmp_dir, dvc):
 # are the same 260 chars, which makes the test unnecessarily complex
 @pytest.mark.skipif(os.name == "nt", reason="unsupported on Windows")
 def test_add_long_fname(tmp_dir, dvc):
-    name_max = os.pathconf(tmp_dir, "PC_NAME_MAX")
+    name_max = os.pathconf(tmp_dir, "PC_NAME_MAX")  # pylint: disable=no-member
     name = "a" * name_max
     tmp_dir.gen({"data": {name: "foo"}})
 
@@ -1013,10 +940,10 @@ def test_add_long_fname(tmp_dir, dvc):
     assert (tmp_dir / "data").read_text() == {name: "foo"}
 
 
-def test_add_to_remote(tmp_dir, dvc, local_cloud, local_remote):
-    local_cloud.gen("foo", "foo")
+def test_add_to_remote(tmp_dir, dvc, remote, workspace):
+    workspace.gen("foo", "foo")
 
-    url = "remote://upstream/foo"
+    url = "remote://workspace/foo"
     [stage] = dvc.add(url, to_remote=True)
 
     assert not (tmp_dir / "foo").exists()
@@ -1026,11 +953,16 @@ def test_add_to_remote(tmp_dir, dvc, local_cloud, local_remote):
     assert len(stage.outs) == 1
 
     hash_info = stage.outs[0].hash_info
-    assert local_remote.hash_to_path_info(hash_info.value).read_text() == "foo"
-    assert hash_info.size == len("foo")
+    meta = stage.outs[0].meta
+    with open(
+        remote.hash_to_path(hash_info.value), encoding="utf-8"
+    ) as stream:
+        assert stream.read() == "foo"
+
+    assert meta.size == len("foo")
 
 
-def test_add_to_remote_absolute(tmp_dir, make_tmp_dir, dvc, local_remote):
+def test_add_to_remote_absolute(tmp_dir, make_tmp_dir, dvc, remote):
     tmp_abs_dir = make_tmp_dir("abs")
     tmp_foo = tmp_abs_dir / "foo"
     tmp_foo.write_text("foo")
@@ -1071,8 +1003,8 @@ def test_add_to_cache_dir(tmp_dir, dvc, local_cloud):
     (stage,) = dvc.add(str(local_cloud / "data"), out="data")
     assert len(stage.deps) == 0
     assert len(stage.outs) == 1
-    assert stage.outs[0].hash_info.size == len("foo") + len("bar")
-    assert stage.outs[0].hash_info.nfiles == 2
+    assert stage.outs[0].meta.size == len("foo") + len("bar")
+    assert stage.outs[0].meta.nfiles == 2
 
     data = tmp_dir / "data"
     assert data.read_text() == {"foo": "foo", "bar": "bar"}
@@ -1146,25 +1078,6 @@ def test_add_to_cache_invalid_combinations(dvc, invalid_opt, kwargs):
         dvc.add(out="bar", **kwargs)
 
 
-@pytest.mark.parametrize(
-    "workspace",
-    [
-        pytest.lazy_fixture("local_cloud"),
-        pytest.lazy_fixture("s3"),
-        pytest.param(
-            pytest.lazy_fixture("gs"), marks=pytest.mark.needs_internet
-        ),
-        pytest.lazy_fixture("hdfs"),
-        pytest.param(
-            pytest.lazy_fixture("ssh"),
-            marks=pytest.mark.skipif(
-                os.name == "nt", reason="disabled on windows"
-            ),
-        ),
-        pytest.lazy_fixture("http"),
-    ],
-    indirect=True,
-)
 def test_add_to_cache_from_remote(tmp_dir, dvc, workspace):
     workspace.gen("foo", "foo")
 

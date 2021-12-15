@@ -8,11 +8,31 @@ from funcy import first, get_in
 from dvc.exceptions import InvalidArgumentError
 from dvc.main import main
 from dvc.repo.experiments.base import EXPS_STASH, ExpRefInfo
-from dvc.repo.experiments.executor.base import BaseExecutor, ExecutorInfo
+from dvc.repo.experiments.executor.base import (
+    EXEC_PID_DIR,
+    EXEC_TMP_DIR,
+    BaseExecutor,
+    ExecutorInfo,
+)
 from dvc.repo.experiments.utils import exp_refs_by_rev
 from dvc.utils.fs import makedirs
 from dvc.utils.serialize import YAMLFileCorruptedError
 from tests.func.test_repro_multistage import COPY_SCRIPT
+from tests.utils import console_width
+
+
+def make_executor_info(**kwargs):
+    # set default values for required info fields
+    for key in (
+        "git_url",
+        "baseline_rev",
+        "location",
+        "root_dir",
+        "dvc_dir",
+    ):
+        if key not in kwargs:
+            kwargs[key] = ""
+    return ExecutorInfo(**kwargs)
 
 
 def test_show_simple(tmp_dir, scm, dvc, exp_stage):
@@ -270,8 +290,6 @@ def test_show_filter(
     included,
     excluded,
 ):
-    from contextlib import contextmanager
-
     from dvc.ui import ui
 
     capsys.readouterr()
@@ -317,21 +335,7 @@ def test_show_filter(
     if e_params is not None:
         command.append(f"--exclude-params={e_params}")
 
-    @contextmanager
-    def console_with(console, width):
-        console_options = console.options
-        original = console_options.max_width
-        con_width = console._width
-
-        try:
-            console_options.max_width = width
-            console._width = width
-            yield
-        finally:
-            console_options.max_width = original
-            console._width = con_width
-
-    with console_with(ui.rich_console, 255):
+    with console_width(ui.rich_console, 255):
         assert main(command) == 0
     cap = capsys.readouterr()
 
@@ -382,11 +386,15 @@ def test_show_sort(tmp_dir, scm, dvc, exp_stage, caplog):
 
 
 def test_show_running_workspace(tmp_dir, scm, dvc, exp_stage, capsys):
-    pid_dir = os.path.join(dvc.tmp_dir, dvc.experiments.EXEC_PID_DIR)
-    makedirs(pid_dir, True)
-    info = ExecutorInfo(None, None, None, BaseExecutor.DEFAULT_LOCATION)
-    pidfile = os.path.join(pid_dir, f"workspace{BaseExecutor.PIDFILE_EXT}")
-    (tmp_dir / pidfile).dump(info.to_dict())
+    pid_dir = os.path.join(dvc.tmp_dir, EXEC_TMP_DIR, EXEC_PID_DIR)
+    info = make_executor_info(location=BaseExecutor.DEFAULT_LOCATION)
+    pidfile = os.path.join(
+        pid_dir,
+        "workspace",
+        f"workspace{BaseExecutor.INFOFILE_EXT}",
+    )
+    makedirs(os.path.dirname(pidfile), True)
+    (tmp_dir / pidfile).dump_json(info.asdict())
 
     assert dvc.experiments.show()["workspace"] == {
         "baseline": {
@@ -413,11 +421,15 @@ def test_show_running_executor(tmp_dir, scm, dvc, exp_stage):
     dvc.experiments.run(exp_stage.addressing, params=["foo=2"], queue=True)
     exp_rev = dvc.experiments.scm.resolve_rev(f"{EXPS_STASH}@{{0}}")
 
-    pid_dir = os.path.join(dvc.tmp_dir, dvc.experiments.EXEC_PID_DIR)
-    makedirs(pid_dir, True)
-    info = ExecutorInfo(None, None, None, BaseExecutor.DEFAULT_LOCATION)
-    pidfile = os.path.join(pid_dir, f"{exp_rev}{BaseExecutor.PIDFILE_EXT}")
-    (tmp_dir / pidfile).dump(info.to_dict())
+    pid_dir = os.path.join(dvc.tmp_dir, EXEC_TMP_DIR, EXEC_PID_DIR)
+    info = make_executor_info(location=BaseExecutor.DEFAULT_LOCATION)
+    pidfile = os.path.join(
+        pid_dir,
+        exp_rev,
+        f"{exp_rev}{BaseExecutor.INFOFILE_EXT}",
+    )
+    makedirs(os.path.dirname(pidfile), True)
+    (tmp_dir / pidfile).dump_json(info.asdict())
 
     results = dvc.experiments.show()
     exp_data = get_in(results, [baseline_rev, exp_rev, "data"])
@@ -445,17 +457,21 @@ def test_show_running_checkpoint(
     checkpoint_rev = first(run_results)
     exp_ref = first(exp_refs_by_rev(scm, checkpoint_rev))
 
-    pid_dir = os.path.join(dvc.tmp_dir, dvc.experiments.EXEC_PID_DIR)
-    makedirs(pid_dir, True)
+    pid_dir = os.path.join(dvc.tmp_dir, EXEC_TMP_DIR, EXEC_PID_DIR)
     executor = (
         BaseExecutor.DEFAULT_LOCATION
         if workspace
         else TempDirExecutor.DEFAULT_LOCATION
     )
-    info = ExecutorInfo(123, "foo.git", baseline_rev, executor)
+    info = make_executor_info(
+        git_url="foo.git",
+        baseline_rev=baseline_rev,
+        location=executor,
+    )
     rev = "workspace" if workspace else stash_rev
-    pidfile = os.path.join(pid_dir, f"{rev}{BaseExecutor.PIDFILE_EXT}")
-    (tmp_dir / pidfile).dump(info.to_dict())
+    pidfile = os.path.join(pid_dir, f"{rev}{BaseExecutor.INFOFILE_EXT}")
+    makedirs(os.path.dirname(pidfile), True)
+    (tmp_dir / pidfile).dump_json(info.asdict())
 
     mocker.patch.object(
         BaseExecutor, "fetch_exps", return_value=[str(exp_ref)]
@@ -477,7 +493,7 @@ def test_show_with_broken_repo(tmp_dir, scm, dvc, exp_stage, caplog):
     exp1 = dvc.experiments.run(exp_stage.addressing, params=["foo=2"])
     exp2 = dvc.experiments.run(exp_stage.addressing, params=["foo=3"])
 
-    with open("dvc.yaml", "a") as fd:
+    with open("dvc.yaml", "a", encoding="utf-8") as fd:
         fd.write("breaking the yaml!")
 
     result = dvc.experiments.show()
@@ -538,3 +554,46 @@ def test_show_csv(tmp_dir, scm, dvc, exp_stage, capsys):
         )
         in cap.out
     )
+
+
+def test_show_only_changed(tmp_dir, dvc, scm, capsys):
+    tmp_dir.gen("copy.py", COPY_SCRIPT)
+    params_file = tmp_dir / "params.yaml"
+    params_data = {
+        "foo": 1,
+        "bar": 1,
+    }
+    (tmp_dir / params_file).dump(params_data)
+
+    dvc.run(
+        cmd="python copy.py params.yaml metrics.yaml",
+        metrics_no_cache=["metrics.yaml"],
+        params=["foo", "bar"],
+        name="copy-file",
+        deps=["copy.py"],
+    )
+    scm.add(
+        [
+            "dvc.yaml",
+            "dvc.lock",
+            "copy.py",
+            "params.yaml",
+            "metrics.yaml",
+            ".gitignore",
+        ]
+    )
+    scm.commit("init")
+
+    dvc.experiments.run(params=["foo=2"])
+
+    capsys.readouterr()
+    assert main(["exp", "show"]) == 0
+    cap = capsys.readouterr()
+
+    assert "bar" in cap.out
+
+    capsys.readouterr()
+    assert main(["exp", "show", "--only-changed"]) == 0
+    cap = capsys.readouterr()
+
+    assert "bar" not in cap.out

@@ -6,8 +6,8 @@ from funcy import get_in
 from dvc.dvcfile import PIPELINE_FILE
 from dvc.exceptions import OverlappingOutputPathsError
 from dvc.main import main
-from dvc.render.vega import PlotMetricTypeError
 from dvc.repo import Repo
+from dvc.repo.plots import PlotMetricTypeError
 from dvc.utils import onerror_collect
 from dvc.utils.fs import remove
 from dvc.utils.serialize import EncodingError, YAMLFileCorruptedError
@@ -54,7 +54,7 @@ def test_plot_wrong_metric_type(tmp_dir, scm, dvc, run_copy_metrics):
     )
 
     assert isinstance(
-        dvc.plots.collect(targets=["metric.txt"], onerror=onerror_collect)[
+        dvc.plots.show(targets=["metric.txt"], onerror=onerror_collect)[
             "workspace"
         ]["data"]["metric.txt"]["error"],
         PlotMetricTypeError,
@@ -148,7 +148,7 @@ def test_plots_show_overlap(tmp_dir, dvc, run_copy_metrics, clear_before_run):
     dvc._reset()
 
     assert isinstance(
-        dvc.plots.collect(onerror=onerror_collect)["workspace"]["error"],
+        dvc.plots.show(onerror=onerror_collect)["workspace"]["error"],
         OverlappingOutputPathsError,
     )
 
@@ -183,12 +183,12 @@ def test_dir_plots(tmp_dir, dvc, run_copy_metrics):
     assert result["workspace"]["data"][p2]["props"] == props
 
 
-def test_ignore_binary_file(tmp_dir, dvc, run_copy_metrics):
-    with open("file", "wb") as fobj:
+def test_ignore_parsing_error(tmp_dir, dvc, run_copy_metrics):
+    with open("file", "wb", encoding=None) as fobj:
         fobj.write(b"\xc1")
 
     run_copy_metrics("file", "plot_file.json", plots=["plot_file.json"])
-    result = dvc.plots.collect(onerror=onerror_collect)
+    result = dvc.plots.show(onerror=onerror_collect)
 
     assert isinstance(
         result["workspace"]["data"]["plot_file.json"]["error"], EncodingError
@@ -216,10 +216,10 @@ def test_log_errors(
     )
     scm.tag("v1")
 
-    with open(file, "a") as fd:
+    with open(file, "a", encoding="utf-8") as fd:
         fd.write("\nMALFORMED!")
 
-    result = dvc.plots.collect(onerror=onerror_collect)
+    result = dvc.plots.show(onerror=onerror_collect)
     _, error = capsys.readouterr()
 
     assert isinstance(get_in(result, error_path), YAMLFileCorruptedError)

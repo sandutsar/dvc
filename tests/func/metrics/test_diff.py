@@ -145,8 +145,9 @@ def test_metrics_diff_with_unchanged(tmp_dir, scm, dvc, run_copy_metrics):
 
 
 def test_no_commits(tmp_dir):
+    from scmrepo.git import Git
+
     from dvc.repo import Repo
-    from dvc.scm.git import Git
     from tests.dir_helpers import git_init
 
     git_init(".")
@@ -187,9 +188,10 @@ def test_metrics_diff_cli(tmp_dir, scm, dvc, run_copy_metrics, caplog, capsys):
     assert main(["metrics", "diff", "HEAD~2"]) == 0
 
     captured = capsys.readouterr()
+
     assert captured.out == (
-        "Path    Metric    Old      New      Change\n"
-        "m.yaml  foo       1.23457  3.45679  2.22222\n"
+        "Path    Metric    HEAD~2    workspace    Change\n"
+        "m.yaml  foo       1.23457   3.45679      2.22222\n"
     )
 
 

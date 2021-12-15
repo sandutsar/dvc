@@ -1,7 +1,8 @@
-from typing import Generator, Iterable, Optional, Set
+from typing import Callable, Generator, Iterable, Optional, Set
+
+from scmrepo.git import Git
 
 from dvc.exceptions import InvalidArgumentError
-from dvc.scm.git import Git
 
 from .base import (
     EXEC_BASELINE,
@@ -49,11 +50,47 @@ def exp_refs_by_baseline(
         yield ExpRefInfo.from_ref(ref)
 
 
+def iter_remote_refs(
+    scm: "Git", url: str, base: Optional[str] = None, **kwargs
+):
+    from scmrepo.exceptions import AuthError, InvalidRemote
+
+    from dvc.scm import GitAuthError, InvalidRemoteSCMRepo
+
+    try:
+        yield from scm.iter_remote_refs(url, base=base, **kwargs)
+    except InvalidRemote as exc:
+        raise InvalidRemoteSCMRepo(str(exc))
+    except AuthError as exc:
+        raise GitAuthError(str(exc))
+
+
+def push_refspec(
+    scm: "Git",
+    url: str,
+    src: Optional[str],
+    dest: str,
+    force: bool = False,
+    on_diverged: Optional[Callable[[str, str], bool]] = None,
+    **kwargs,
+):
+    from scmrepo.exceptions import AuthError
+
+    from ...scm import GitAuthError
+
+    try:
+        return scm.push_refspec(
+            url, src, dest, force=force, on_diverged=on_diverged, **kwargs
+        )
+    except AuthError as exc:
+        raise GitAuthError(str(exc))
+
+
 def remote_exp_refs(
     scm: "Git", url: str
 ) -> Generator["ExpRefInfo", None, None]:
     """Iterate over all remote experiment refs."""
-    for ref in scm.iter_remote_refs(url, base=EXPS_NAMESPACE):
+    for ref in iter_remote_refs(scm, url, base=EXPS_NAMESPACE):
         if ref.startswith(EXEC_NAMESPACE) or ref == EXPS_STASH:
             continue
         yield ExpRefInfo.from_ref(ref)
@@ -73,7 +110,7 @@ def remote_exp_refs_by_baseline(
 ) -> Generator["ExpRefInfo", None, None]:
     """Iterate over all remote experiment refs with the specified baseline."""
     ref_info = ExpRefInfo(baseline_sha=rev)
-    for ref in scm.iter_remote_refs(url, base=str(ref_info)):
+    for ref in iter_remote_refs(scm, url, base=str(ref_info)):
         if ref.startswith(EXEC_NAMESPACE) or ref == EXPS_STASH:
             continue
         yield ExpRefInfo.from_ref(ref)
@@ -157,3 +194,12 @@ def resolve_exp_ref(
         msg.extend([f"\t{info}" for info in exp_ref_list])
         raise InvalidArgumentError("\n".join(msg))
     return exp_ref_list[0]
+
+
+def check_ref_format(scm: "Git", ref: ExpRefInfo):
+    # "/" forbidden, only in dvc exp as we didn't support it for now.
+    if not scm.check_ref_format(str(ref)) or "/" in ref.name:
+        raise InvalidArgumentError(
+            f"Invalid exp name {ref.name}, the exp name must follow rules in "
+            "https://git-scm.com/docs/git-check-ref-format"
+        )

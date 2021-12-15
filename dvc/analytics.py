@@ -68,7 +68,7 @@ def send(path):
     url = "https://analytics.dvc.org"
     headers = {"content-type": "application/json"}
 
-    with open(path) as fobj:
+    with open(path, encoding="utf-8") as fobj:
         report = json.load(fobj)
 
     report.update(_runtime_info())
@@ -82,10 +82,12 @@ def send(path):
 
 
 def _scm_in_use():
+    from scmrepo.noscm import NoSCM
+
     from dvc.exceptions import NotDvcRepoError
     from dvc.repo import Repo
-    from dvc.scm import SCM, NoSCM
-    from dvc.scm.base import SCMError
+
+    from .scm import SCM, SCMError
 
     try:
         scm = SCM(root_dir=Repo.find_root())
@@ -173,13 +175,13 @@ def _find_or_create_user_id():
     try:
         with Lock(lockfile):
             try:
-                with open(fname) as fobj:
+                with open(fname, encoding="utf-8") as fobj:
                     user_id = json.load(fobj)["user_id"]
 
             except (FileNotFoundError, ValueError, KeyError):
                 user_id = str(uuid.uuid4())
 
-                with open(fname, "w") as fobj:
+                with open(fname, "w", encoding="utf-8") as fobj:
                     json.dump({"user_id": user_id}, fobj)
 
             return user_id

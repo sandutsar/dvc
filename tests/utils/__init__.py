@@ -13,7 +13,7 @@ pytest.register_assert_rewrite("tests.utils.asserts")
 
 
 def get_gitignore_content():
-    with open(Git.GITIGNORE) as gitignore:
+    with open(Git.GITIGNORE, encoding="utf-8") as gitignore:
         return gitignore.read().splitlines()
 
 
@@ -54,3 +54,29 @@ def clean_staging():
         )
     except FileNotFoundError:
         pass
+
+
+@contextmanager
+def console_width(console, width):
+    console_options = console.options
+    original = console_options.max_width
+    con_width = console._width
+
+    try:
+        console_options.max_width = width
+        console._width = width
+        yield
+    finally:
+        console_options.max_width = original
+        console._width = con_width
+
+
+class ANY:
+    def __init__(self, expected_type):
+        self.expected_type = expected_type
+
+    def __repr__(self):
+        return "Any" + self.expected_type.__name__.capitalize()
+
+    def __eq__(self, other):
+        return isinstance(other, self.expected_type)

@@ -22,13 +22,6 @@ umask = os.umask(0)
 os.umask(umask)
 
 
-def fs_copy(src, dst, ignore=None):
-    if os.path.isdir(src):
-        shutil.copytree(src, dst, ignore=ignore)
-    else:
-        shutil.copy2(src, dst)
-
-
 def get_inode(path):
     inode = System.inode(path)
     logger.trace("Path '%s' inode '%d'", path, inode)
@@ -42,9 +35,9 @@ def get_mtime_and_size(path, fs, dvcignore=None):
         size = 0
         files_mtimes = {}
         if dvcignore:
-            walk_iterator = dvcignore.walk_files(fs, path)
+            walk_iterator = dvcignore.find(fs, path)
         else:
-            walk_iterator = fs.walk_files(path)
+            walk_iterator = fs.find(path)
         for file_path in walk_iterator:
             try:
                 stats = fs.info(file_path)
@@ -54,7 +47,7 @@ def get_mtime_and_size(path, fs, dvcignore=None):
                     raise
                 continue
             size += stats["size"]
-            files_mtimes[os.fspath(file_path)] = stats["mtime"]
+            files_mtimes[file_path] = stats["mtime"]
 
         # We track file changes and moves, which cannot be detected with simply
         # max(mtime(f) for f in non_ignored_files)
@@ -206,7 +199,7 @@ def copyfile(src, dest, callback=None, no_progress_bar=False, name=None):
 
     try:
         System.reflink(src, dest)
-    except DvcException:
+    except OSError:
         from dvc.progress import tdqm_or_callback_wrapped
 
         with open(src, "rb") as fsrc, open(dest, "wb+") as fdest:
@@ -244,7 +237,7 @@ def walk_files(directory):
 def as_atomic(fs, to_info):
     from dvc.utils import tmp_fname
 
-    tmp_info = to_info.parent / tmp_fname()
+    tmp_info = fs.path.join(fs.path.parent(to_info), tmp_fname())
     try:
         yield tmp_info
     except BaseException:

@@ -216,18 +216,6 @@ class DvcIgnoreInCollectedDirError(DvcException):
         )
 
 
-class GitHookAlreadyExistsError(DvcException):
-    def __init__(self, hook_name):
-        from dvc.utils import format_link
-
-        super().__init__(
-            "Hook '{}' already exists. Please refer to {} for more "
-            "info.".format(
-                hook_name, format_link("https://man.dvc.org/install")
-            )
-        )
-
-
 class FileTransferError(DvcException):
     _METHOD = "transfer"
 
@@ -305,7 +293,7 @@ class PathMissingError(DvcException):
 
 
 class RemoteCacheRequiredError(DvcException):
-    def __init__(self, path_info):
+    def __init__(self, scheme, fs_path):
         from dvc.utils import format_link
 
         super().__init__(
@@ -314,8 +302,8 @@ class RemoteCacheRequiredError(DvcException):
                 "existing cache on '{}' remote. See {} for information on how "
                 "to set up remote cache."
             ).format(
-                path_info,
-                path_info.scheme,
+                fs_path,
+                scheme,
                 format_link("https://man.dvc.org/config#cache"),
             )
         )
@@ -350,12 +338,12 @@ class CacheLinkError(DvcException):
         )
     )
 
-    def __init__(self, path_infos):
+    def __init__(self, fs_paths):
         msg = "No possible cache link types for '{}'. {}".format(
-            ", ".join([str(path) for path in path_infos]), self.SUPPORT_LINK
+            ", ".join(fs_paths), self.SUPPORT_LINK
         )
         super().__init__(msg)
-        self.path_infos = path_infos
+        self.fs_paths = fs_paths
 
 
 class CircularImportError(DvcException):

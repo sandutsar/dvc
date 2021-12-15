@@ -7,8 +7,8 @@ from itertools import groupby, takewhile
 from pathspec.patterns import GitWildMatchPattern
 from pathspec.util import normalize_file
 
-from dvc.fs.base import BaseFileSystem
-from dvc.path_info import PathInfo
+from dvc.fs.base import FileSystem
+from dvc.fs.local import localfs
 from dvc.pathspec_math import PatternInfo, merge_patterns
 from dvc.scheme import Schemes
 from dvc.types import AnyPath, List, Optional
@@ -267,25 +267,25 @@ class DvcIgnoreFilter:
             dirs, files = ignore_pattern(abs_root, dirs, files)
         return dirs, files
 
-    def walk(self, fs: BaseFileSystem, path_info: AnyPath, **kwargs):
+    def walk(self, fs: FileSystem, path: AnyPath, **kwargs):
         ignore_subrepos = kwargs.pop("ignore_subrepos", True)
         if fs.scheme == Schemes.LOCAL:
-            for root, dirs, files in fs.walk(path_info, **kwargs):
+            for root, dirs, files in fs.walk(path, **kwargs):
                 dirs[:], files[:] = self(
                     root, dirs, files, ignore_subrepos=ignore_subrepos
                 )
                 yield root, dirs, files
         else:
-            yield from fs.walk(path_info, **kwargs)
+            yield from fs.walk(path, **kwargs)
 
-    def walk_files(self, fs: BaseFileSystem, path_info: AnyPath, **kwargs):
+    def find(self, fs: FileSystem, path: AnyPath, **kwargs):
         if fs.scheme == Schemes.LOCAL:
-            for root, _, files in self.walk(fs, path_info, **kwargs):
+            for root, _, files in self.walk(fs, path, **kwargs):
                 for file in files:
                     # NOTE: os.path.join is ~5.5 times slower
-                    yield PathInfo(f"{root}{os.sep}{file}")
+                    yield f"{root}{os.sep}{file}"
         else:
-            yield from fs.walk_files(path_info)
+            yield from fs.find(path)
 
     def _get_trie_pattern(
         self, dirname, dnames: Optional["List"] = None, ignore_subrepos=True
@@ -307,7 +307,7 @@ class DvcIgnoreFilter:
         dirs = list(
             takewhile(
                 lambda path: path != prefix,
-                (parent.fspath for parent in PathInfo(dirname).parents),
+                (parent for parent in localfs.path.parents(dirname)),
             )
         )
         dirs.reverse()
@@ -343,8 +343,6 @@ class DvcIgnoreFilter:
         return self._is_ignored(path, False)
 
     def _outside_repo(self, path):
-        path = PathInfo(path)
-
         # paths outside of the repo should be ignored
         path = relpath(path, self.root_dir)
         if path.startswith("..") or (
@@ -373,7 +371,7 @@ class DvcIgnoreFilter:
         return _no_match(target)
 
     def is_ignored(
-        self, fs: BaseFileSystem, path: str, ignore_subrepos: bool = True
+        self, fs: FileSystem, path: str, ignore_subrepos: bool = True
     ) -> bool:
         # NOTE: can't use self.check_ignore(path).match for now, see
         # https://github.com/iterative/dvc/issues/4555
@@ -393,7 +391,7 @@ def init(path):
     if os.path.exists(dvcignore):
         return dvcignore
 
-    with open(dvcignore, "w") as fobj:
+    with open(dvcignore, "w", encoding="utf-8") as fobj:
         fobj.write(
             "# Add patterns of files dvc should ignore, which could improve\n"
             "# the performance. Learn more at\n"

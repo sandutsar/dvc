@@ -12,10 +12,6 @@ class TemplateNotFoundError(DvcException):
         super().__init__(f"Template '{path}' not found.")
 
 
-class BadTemplateError(DvcException):
-    pass
-
-
 class NoFieldInDataError(DvcException):
     def __init__(self, field_name):
         super().__init__(
@@ -49,65 +45,32 @@ class Template:
         assert self.content and self.name
         self.filename = self.name + self.EXTENSION
 
-    def render(self, data, props=None):
-        props = props or {}
-
-        if self._anchor_str("data") not in self.content:
-            anchor = self.anchor("data")
-            raise BadTemplateError(
-                f"Template '{self.filename}' is not using '{anchor}' anchor"
-            )
-
-        if props.get("x"):
-            Template._check_field_exists(data, props.get("x"))
-        if props.get("y"):
-            Template._check_field_exists(data, props.get("y"))
-
-        content = self._fill_anchor(self.content, "data", data)
-        content = self._fill_metadata(content, props)
-
-        return content
-
     @classmethod
     def anchor(cls, name):
         return cls.ANCHOR.format(name.upper())
 
     def has_anchor(self, name):
-        return self._anchor_str(name) in self.content
+        return self.anchor_str(name) in self.content
 
     @classmethod
-    def _fill_anchor(cls, content, name, value):
+    def fill_anchor(cls, content, name, value):
         value_str = json.dumps(
             value, indent=cls.INDENT, separators=cls.SEPARATORS, sort_keys=True
         )
-        return content.replace(cls._anchor_str(name), value_str)
+        return content.replace(cls.anchor_str(name), value_str)
 
     @classmethod
-    def _anchor_str(cls, name):
+    def anchor_str(cls, name):
         return f'"{cls.anchor(name)}"'
 
-    @classmethod
-    def _fill_metadata(cls, content, props):
-        props.setdefault("title", "")
-        props.setdefault("x_label", props.get("x"))
-        props.setdefault("y_label", props.get("y"))
-
-        names = ["title", "x", "y", "x_label", "y_label"]
-        for name in names:
-            value = props.get(name)
-            if value is not None:
-                content = cls._fill_anchor(content, name, value)
-
-        return content
-
     @staticmethod
-    def _check_field_exists(data, field):
+    def check_field_exists(data, field):
         if not any(field in row for row in data):
             raise NoFieldInDataError(field)
 
 
-class DefaultTemplate(Template):
-    DEFAULT_NAME = "default"
+class SimpleLinearTemplate(Template):
+    DEFAULT_NAME = "simple"
 
     DEFAULT_CONTENT = {
         "$schema": "https://vega.github.io/schema/vega-lite/v4.json",
@@ -530,7 +493,7 @@ class LinearTemplate(Template):
 class PlotTemplates:
     TEMPLATES_DIR = "plots"
     TEMPLATES = [
-        DefaultTemplate,
+        SimpleLinearTemplate,
         LinearTemplate,
         ConfusionTemplate,
         NormalizedConfusionTemplate,
@@ -542,14 +505,15 @@ class PlotTemplates:
     def templates_dir(self):
         return os.path.join(self.dvc_dir, self.TEMPLATES_DIR)
 
-    def get_template(self, path):
-        if os.path.exists(path):
-            return path
+    def get_template(self, template_name: str):
+        template_path = os.path.abspath(template_name)
+        if os.path.exists(template_path):
+            return os.path.abspath(template_path)
 
         if self.dvc_dir and os.path.exists(self.dvc_dir):
-            t_path = os.path.join(self.templates_dir, path)
-            if os.path.exists(t_path):
-                return t_path
+            template_path = os.path.join(self.templates_dir, template_name)
+            if os.path.exists(template_path):
+                return template_path
 
             all_templates = [
                 os.path.join(root, file)
@@ -559,13 +523,12 @@ class PlotTemplates:
             matches = [
                 template
                 for template in all_templates
-                if os.path.splitext(template)[0] == t_path
+                if os.path.splitext(template)[0] == template_path
             ]
             if matches:
                 assert len(matches) == 1
                 return matches[0]
-
-        raise TemplateNotFoundError(path)
+        raise TemplateNotFoundError(template_name)
 
     def __init__(self, dvc_dir):
         self.dvc_dir = dvc_dir
@@ -579,19 +542,22 @@ class PlotTemplates:
 
     def _dump(self, template):
         path = os.path.join(self.templates_dir, template.filename)
-        with open(path, "w") as fd:
+        with open(path, "w", encoding="utf-8") as fd:
             fd.write(template.content)
 
-    def load(self, name):
-        try:
-            path = self.get_template(name)
+    def load(self, template_name=None):
+        if not template_name:
+            template_name = "linear"
 
-            with open(path) as fd:
+        try:
+            path = self.get_template(template_name)
+
+            with open(path, "r", encoding="utf-8") as fd:
                 content = fd.read()
 
-            return Template(content, name=name)
+            return Template(content, name=template_name)
         except TemplateNotFoundError:
             for template in self.TEMPLATES:
-                if template.DEFAULT_NAME == name:
+                if template.DEFAULT_NAME == template_name:
                     return template()
             raise

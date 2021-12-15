@@ -4,9 +4,9 @@ from typing import List, Optional
 from dvc.exceptions import InvalidArgumentError
 from dvc.repo import locked
 from dvc.repo.scm_context import scm_context
-from dvc.scm.base import RevError
+from dvc.scm import RevError
 
-from .utils import exp_refs, remove_exp_refs, resolve_exp_ref
+from .utils import exp_refs, push_refspec, remove_exp_refs, resolve_exp_ref
 
 logger = logging.getLogger(__name__)
 
@@ -49,13 +49,16 @@ def _clear_all(repo):
 
 def _get_exp_stash_index(repo, ref_or_rev: str) -> Optional[int]:
     stash_revs = repo.experiments.stash_revs
-    for _, ref_info in stash_revs.items():
-        if ref_info.name == ref_or_rev:
-            return ref_info.index
+    for _, entry in stash_revs.items():
+        if entry.name == ref_or_rev:
+            return entry.stash_index
+
+    from dvc.scm import resolve_rev
+
     try:
-        rev = repo.scm.resolve_rev(ref_or_rev)
+        rev = resolve_rev(repo.scm, ref_or_rev)
         if rev in stash_revs:
-            return stash_revs.get(rev).index
+            return stash_revs.get(rev).stash_index
     except RevError:
         pass
     return None
@@ -77,8 +80,17 @@ def _remove_commited_exps(
         if not remote:
             remove_exp_refs(repo.scm, remove_list)
         else:
+            from dvc.scm import TqdmGit
+
             for ref_info in remove_list:
-                repo.scm.push_refspec(remote, None, str(ref_info))
+                with TqdmGit(desc="Pushing git refs") as pbar:
+                    push_refspec(
+                        repo.scm,
+                        remote,
+                        None,
+                        str(ref_info),
+                        progress=pbar.update_git,
+                    )
     return remain_list
 
 

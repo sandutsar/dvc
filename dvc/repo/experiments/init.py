@@ -1,15 +1,35 @@
+import logging
 import os
-from typing import TYPE_CHECKING, Dict, Iterable
+from contextlib import contextmanager
+from functools import partial
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    TextIO,
+    Tuple,
+    Union,
+    cast,
+)
 
-from funcy import compact, lremove, post_processing
-from rich.prompt import Prompt
+from funcy import compact, lremove
+from rich.rule import Rule
+from rich.syntax import Syntax
 
+from dvc.exceptions import DvcException
+from dvc.stage import PipelineStage
+from dvc.stage.serialize import to_pipeline_file
 from dvc.types import OptStr
+from dvc.utils.serialize import dumps_yaml
 
 if TYPE_CHECKING:
     from dvc.repo import Repo
     from dvc.dvcfile import DVCFile
-    from dvc.stage import Stage
+    from rich.tree import Tree
 
 from dvc.ui import ui
 
@@ -25,96 +45,115 @@ PROMPTS = {
 }
 
 
-class RequiredPrompt(Prompt):
-    def process_response(self, value: str):
-        from rich.prompt import InvalidResponse
+def _prompts(
+    keys: Iterable[str],
+    defaults: Dict[str, str] = None,
+    validator: Callable[[str, str], Union[str, Tuple[str, str]]] = None,
+    allow_omission: bool = True,
+    stream: Optional[TextIO] = None,
+) -> Dict[str, OptStr]:
+    from dvc.ui.prompt import Prompt
 
-        ret = super().process_response(value)
-        if not ret:
-            raise InvalidResponse(
-                "[prompt.invalid]Response required. Please try again."
-            )
-        return ret
-
-    @classmethod
-    def get_input(cls, *args, **kwargs) -> str:
-        try:
-            return super().get_input(*args, **kwargs)
-        except (KeyboardInterrupt, EOFError):
-            ui.error_write()
-            raise
-
-    def render_default(self, default):
-        from rich.text import Text
-
-        return Text(f"{default!s}", "green")
+    defaults = defaults or {}
+    return {
+        key: Prompt.prompt_(
+            PROMPTS[key],
+            console=ui.error_console,
+            default=defaults.get(key),
+            validator=partial(validator, key) if validator else None,
+            allow_omission=allow_omission,
+            stream=stream,
+        )
+        for key in keys
+    }
 
 
-class SkippablePrompt(RequiredPrompt):
-    skip_value: str = "n"
+@contextmanager
+def _disable_logging(highest_level=logging.CRITICAL):
+    previous_level = logging.root.manager.disable
 
-    def process_response(self, value: str):
-        ret = super().process_response(value)
-        return None if ret == self.skip_value else ret
+    logging.disable(highest_level)
 
-    def make_prompt(self, default):
-        prompt = self.prompt.copy()
-        prompt.end = ""
-
-        prompt.append(" [")
-        if (
-            default is not ...
-            and self.show_default
-            and isinstance(default, (str, self.response_type))
-        ):
-            _default = self.render_default(default)
-            prompt.append(_default)
-            prompt.append(", ")
-
-        prompt.append(f"{self.skip_value} to skip", style="italic")
-        prompt.append("]")
-        prompt.append(self.prompt_suffix)
-        return prompt
+    try:
+        yield
+    finally:
+        logging.disable(previous_level)
 
 
-@post_processing(dict)
-def _prompts(keys: Iterable[str], defaults: Dict[str, OptStr]):
-    for key in keys:
-        if key == "cmd":
-            prompt_cls = RequiredPrompt
-        else:
-            prompt_cls = SkippablePrompt
-        kwargs = {"default": defaults[key]} if key in defaults else {}
-        prompt = PROMPTS.get(key)
-        value = prompt_cls.ask(prompt, console=ui.error_console, **kwargs)
-        yield key, value
+def build_workspace_tree(workspace: Dict[str, str]) -> "Tree":
+    from rich.tree import Tree
+
+    tree = Tree(
+        "DVC assumes the following workspace structure:",
+        highlight=True,
+    )
+    for value in sorted(workspace.values()):
+        tree.add(f"[green]{value}[/green]")
+    return tree
+
+
+PIPELINE_FILE_LINK = "https://s.dvc.org/g/pipeline-files"
 
 
 def init_interactive(
+    name: str,
     defaults: Dict[str, str],
-    provided: Iterable[str],
-    show_heading: bool = False,
+    provided: Dict[str, str],
+    validator: Callable[[str, str], Union[str, Tuple[str, str]]] = None,
     live: bool = False,
+    stream: Optional[TextIO] = None,
 ) -> Dict[str, str]:
-    primary = lremove(provided, ["cmd", "code", "data", "models", "params"])
-    secondary = lremove(provided, ["live"] if live else ["metrics", "plots"])
-
-    if not (primary or secondary):
-        return {}
-
-    message = (
-        "This command will guide you to set up your first stage in "
-        "[green]dvc.yaml[/green].\n"
+    command = provided.pop("cmd", None)
+    primary = lremove(provided.keys(), ["code", "data", "models", "params"])
+    secondary = lremove(
+        provided.keys(), ["live"] if live else ["metrics", "plots"]
     )
-    if show_heading:
-        ui.error_write(message, styled=True)
+    prompts = primary + secondary
 
-    return compact(
-        {
-            **_prompts(primary, defaults),
-            **_prompts(secondary, defaults),
-        }
+    workspace = {**defaults, **provided}
+    if not live and "live" not in provided:
+        workspace.pop("live", None)
+    for key in ("plots", "metrics"):
+        if live and key not in provided:
+            workspace.pop(key, None)
+
+    ret: Dict[str, str] = {}
+    if command:
+        ret["cmd"] = command
+
+    if not prompts and command:
+        return ret
+
+    ui.error_write(
+        f"This command will guide you to set up a [bright_blue]{name}[/]",
+        "stage in [green]dvc.yaml[/].",
+        f"\nSee [repr.url]{PIPELINE_FILE_LINK}[/].\n",
+        styled=True,
     )
+
+    if not command:
+        ret.update(
+            compact(_prompts(["cmd"], allow_omission=False, stream=stream))
+        )
+        if prompts:
+            ui.error_write(styled=True)
+
+    if not prompts:
+        return ret
+
+    ui.error_write(
+        "Enter the paths for dependencies and outputs of the command.",
+        styled=True,
+    )
+    if workspace:
+        ui.error_write(build_workspace_tree(workspace), styled=True)
+    ui.error_write(styled=True)
+    ret.update(
+        compact(
+            _prompts(prompts, defaults, validator=validator, stream=stream)
+        )
+    )
+    return ret
 
 
 def _check_stage_exists(
@@ -129,58 +168,85 @@ def _check_stage_exists(
         )
 
 
+def loadd_params(path: str) -> Dict[str, List[str]]:
+    from dvc.utils.serialize import LOADERS
+
+    _, ext = os.path.splitext(path)
+    return {path: list(LOADERS[ext](path))}
+
+
+def validate_prompts(key: str, value: str) -> Union[Any, Tuple[Any, str]]:
+    from dvc.ui.prompt import InvalidResponse
+
+    if key == "params":
+        assert isinstance(value, str)
+        msg_format = (
+            "[prompt.invalid]'{0}' {1}. "
+            "Please retry with an existing parameters file."
+        )
+        if not os.path.exists(value):
+            raise InvalidResponse(msg_format.format(value, "does not exist"))
+        if os.path.isdir(value):
+            raise InvalidResponse(msg_format.format(value, "is a directory"))
+    elif key in ("code", "data"):
+        if not os.path.exists(value):
+            return value, (
+                f"[yellow]'{value}' does not exist in the workspace. "
+                '"exp run" may fail.[/]'
+            )
+    return value
+
+
 def init(
     repo: "Repo",
-    name: str = None,
+    name: str = "train",
     type: str = "default",  # pylint: disable=redefined-builtin
     defaults: Dict[str, str] = None,
     overrides: Dict[str, str] = None,
     interactive: bool = False,
     force: bool = False,
-) -> "Stage":
+    stream: Optional[TextIO] = None,
+) -> PipelineStage:
     from dvc.dvcfile import make_dvcfile
 
     dvcfile = make_dvcfile(repo, "dvc.yaml")
-    name = name or type
-
     _check_stage_exists(dvcfile, name, force=force)
 
-    defaults = defaults or {}
-    overrides = overrides or {}
+    defaults = defaults.copy() if defaults else {}
+    overrides = overrides.copy() if overrides else {}
 
-    with_live = type == "live"
+    with_live = type == "dl"
+
     if interactive:
         defaults = init_interactive(
-            defaults=defaults or {},
-            show_heading=not dvcfile.exists(),
+            name,
+            validator=validate_prompts,
+            defaults=defaults,
             live=with_live,
-            provided=overrides.keys(),
+            provided=overrides,
+            stream=stream,
         )
     else:
         if with_live:
-            # suppress `metrics`/`params` if live is selected, unless
+            # suppress `metrics`/`plots` if live is selected, unless
             # it is also provided via overrides/cli.
             # This makes output to be a checkpoint as well.
-            defaults.pop("metrics")
-            defaults.pop("params")
+            defaults.pop("metrics", None)
+            defaults.pop("plots", None)
         else:
-            defaults.pop("live")  # suppress live otherwise
+            defaults.pop("live", None)  # suppress live otherwise
 
     context: Dict[str, str] = {**defaults, **overrides}
     assert "cmd" in context
 
     params_kv = []
-    if context.get("params"):
-        from dvc.utils.serialize import LOADERS
-
-        path = context["params"]
-        assert isinstance(path, str)
-        _, ext = os.path.splitext(path)
-        params_kv = [{path: list(LOADERS[ext](path))}]
+    params = context.get("params")
+    if params:
+        params_kv.append(loadd_params(params))
 
     checkpoint_out = bool(context.get("live"))
     models = context.get("models")
-    return repo.stage.add(
+    stage = repo.stage.create(
         name=name,
         cmd=context["cmd"],
         deps=compact([context.get("code"), context.get("data")]),
@@ -191,3 +257,28 @@ def init(
         force=force,
         **{"checkpoints" if checkpoint_out else "outs": compact([models])},
     )
+
+    if interactive:
+        ui.error_write(Rule(style="green"), styled=True)
+        _yaml = dumps_yaml(to_pipeline_file(cast(PipelineStage, stage)))
+        syn = Syntax(_yaml, "yaml", theme="ansi_dark")
+        ui.error_write(syn, styled=True)
+
+    from dvc.ui.prompt import Confirm
+
+    if not interactive or Confirm.ask(
+        "Do you want to add the above contents to dvc.yaml?",
+        console=ui.error_console,
+        default=True,
+        stream=stream,
+    ):
+        with _disable_logging(), repo.scm_context(autostage=True, quiet=True):
+            stage.dump(update_lock=False)
+            stage.ignore_outs()
+            if params:
+                repo.scm_context.track_file(params)
+    else:
+        raise DvcException("Aborting ...")
+
+    assert isinstance(stage, PipelineStage)
+    return stage

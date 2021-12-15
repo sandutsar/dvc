@@ -5,8 +5,7 @@ from dvc.config import Config
 from dvc.exceptions import InitError, InvalidArgumentError
 from dvc.ignore import init as init_dvcignore
 from dvc.repo import Repo
-from dvc.scm import SCM
-from dvc.scm.base import SCMError
+from dvc.scm import SCM, SCMError
 from dvc.utils import relpath
 from dvc.utils.fs import remove
 
@@ -78,14 +77,18 @@ def init(root_dir=os.curdir, no_scm=False, force=False, subdir=False):
 
     proj.plots.templates.init()
 
-    scm.add(
-        [config.files["repo"], dvcignore, proj.plots.templates.templates_dir]
-    )
+    with proj.scm_context(autostage=True) as context:
+        files = [
+            config.files["repo"],
+            dvcignore,
+            proj.plots.templates.templates_dir,
+        ]
+        ignore_file = context.scm.ignore_file
+        if ignore_file:
+            files.extend([os.path.join(dvc_dir, ignore_file)])
+        proj.scm_context.track_file(files)
 
     logger.info("Initialized DVC repository.\n")
-
-    if scm.ignore_file:
-        scm.add([os.path.join(dvc_dir, scm.ignore_file)])
+    if not no_scm:
         logger.info("You can now commit the changes to git.\n")
-
     return proj

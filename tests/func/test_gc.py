@@ -22,7 +22,7 @@ class TestGC(TestDvcGit):
         self.dvc.add(self.FOO)
         self.dvc.add(self.DATA_DIR)
         self.good_cache = [
-            self.dvc.odb.local.hash_to_path_info(md5)
+            self.dvc.odb.local.hash_to_path(md5)
             for md5 in self.dvc.odb.local.all()
         ]
 
@@ -60,7 +60,7 @@ class TestGCBranchesTags(TestDvcGit):
     def test(self):
         fname = "file"
 
-        with open(fname, "w+") as fobj:
+        with open(fname, "w+", encoding="utf-8") as fobj:
             fobj.write("v1.0")
 
         stages = self.dvc.add(fname)
@@ -71,7 +71,7 @@ class TestGCBranchesTags(TestDvcGit):
 
         self.dvc.scm.checkout("test", create_new=True)
         self.dvc.remove(stages[0].relpath)
-        with open(fname, "w+") as fobj:
+        with open(fname, "w+", encoding="utf-8") as fobj:
             fobj.write("test")
         stages = self.dvc.add(fname)
         self.assertEqual(len(stages), 1)
@@ -80,7 +80,7 @@ class TestGCBranchesTags(TestDvcGit):
 
         self.dvc.scm.checkout("master")
         self.dvc.remove(stages[0].relpath)
-        with open(fname, "w+") as fobj:
+        with open(fname, "w+", encoding="utf-8") as fobj:
             fobj.write("trash")
         stages = self.dvc.add(fname)
         self.assertEqual(len(stages), 1)
@@ -88,7 +88,7 @@ class TestGCBranchesTags(TestDvcGit):
         self.dvc.scm.commit("trash")
 
         self.dvc.remove(stages[0].relpath)
-        with open(fname, "w+") as fobj:
+        with open(fname, "w+", encoding="utf-8") as fobj:
             fobj.write("master")
         stages = self.dvc.add(fname)
         self.assertEqual(len(stages), 1)
@@ -138,7 +138,7 @@ class TestGCMultipleDvcRepos(TestDvcGit):
 
         # ADD FILE ONLY IN MAIN PROJECT
         fname = "only_in_first"
-        with open(fname, "w+") as fobj:
+        with open(fname, "w+", encoding="utf-8") as fobj:
             fobj.write("only in main repo")
 
         stages = self.dvc.add(fname)
@@ -146,7 +146,7 @@ class TestGCMultipleDvcRepos(TestDvcGit):
 
         # ADD FILE IN MAIN PROJECT THAT IS ALSO IN SECOND PROJECT
         fname = "in_both"
-        with open(fname, "w+") as fobj:
+        with open(fname, "w+", encoding="utf-8") as fobj:
             fobj.write("in both repos")
 
         stages = self.dvc.add(fname)
@@ -156,7 +156,7 @@ class TestGCMultipleDvcRepos(TestDvcGit):
         os.chdir(self.additional_path)
         # ADD FILE ONLY IN SECOND PROJECT
         fname = "only_in_second"
-        with open(fname, "w+") as fobj:
+        with open(fname, "w+", encoding="utf-8") as fobj:
             fobj.write("only in additional repo")
 
         stages = self.additional_dvc.add(fname)
@@ -164,7 +164,7 @@ class TestGCMultipleDvcRepos(TestDvcGit):
 
         # ADD FILE IN SECOND PROJECT THAT IS ALSO IN MAIN PROJECT
         fname = "in_both"
-        with open(fname, "w+") as fobj:
+        with open(fname, "w+", encoding="utf-8") as fobj:
             fobj.write("in both repos")
 
         stages = self.additional_dvc.add(fname)
@@ -343,22 +343,6 @@ def test_gc_not_collect_pipeline_tracked_files(tmp_dir, dvc, run_copy):
     assert _count_files(dvc.odb.local.cache_dir) == 0
 
 
-@pytest.mark.parametrize(
-    "workspace",
-    [
-        pytest.lazy_fixture("local_cloud"),
-        pytest.lazy_fixture("s3"),
-        pytest.lazy_fixture("hdfs"),
-        pytest.lazy_fixture("webhdfs"),
-        pytest.param(
-            pytest.lazy_fixture("ssh"),
-            marks=pytest.mark.skipif(
-                os.name == "nt", reason="disabled on windows"
-            ),
-        ),
-    ],
-    indirect=True,
-)
 def test_gc_external_output(tmp_dir, dvc, workspace):
     workspace.gen({"foo": "foo", "bar": "bar"})
 

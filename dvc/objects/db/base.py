@@ -10,9 +10,9 @@ from dvc.objects.file import HashFile
 from dvc.progress import Tqdm
 
 if TYPE_CHECKING:
-    from dvc.fs.base import BaseFileSystem
+    from dvc.fs.base import FileSystem
     from dvc.hash_info import HashInfo
-    from dvc.types import AnyPath, DvcPath
+    from dvc.types import AnyPath
 
 logger = logging.getLogger(__name__)
 
@@ -23,15 +23,14 @@ class ObjectDB:
     DEFAULT_CACHE_TYPES = ["copy"]
     CACHE_MODE: Optional[int] = None
 
-    def __init__(self, fs: "BaseFileSystem", path_info: "AnyPath", **config):
+    def __init__(self, fs: "FileSystem", path: str, **config):
         from dvc.state import StateNoop
 
         self.fs = fs
-        self.path_info = path_info
+        self.fs_path = path
         self.state = config.get("state", StateNoop())
         self.verify = config.get("verify", self.DEFAULT_VERIFY)
         self.cache_types = config.get("type") or copy(self.DEFAULT_CACHE_TYPES)
-        self.cache_type_confirmed = False
         self.slow_link_warning = config.get("slow_link_warning", True)
         self.tmp_dir = config.get("tmp_dir")
         self.read_only = config.get("read_only", False)
@@ -50,26 +49,25 @@ class ObjectDB:
     def __eq__(self, other):
         return (
             self.fs == other.fs
-            and self.path_info == other.path_info
+            and self.fs_path == other.fs_path
             and self.read_only == other.read_only
         )
 
     def __hash__(self):
-        return hash((self.fs.scheme, self.path_info))
+        return hash((self.fs.scheme, self.fs_path))
 
     def exists(self, hash_info: "HashInfo"):
-        return self.fs.exists(self.hash_to_path_info(hash_info.value))
+        return self.fs.exists(self.hash_to_path(hash_info.value))
 
     def move(self, from_info, to_info):
         self.fs.move(from_info, to_info)
 
-    def makedirs(self, path_info):
-        self.fs.makedirs(path_info)
+    def makedirs(self, fs_path):
+        self.fs.makedirs(fs_path)
 
     def get(self, hash_info: "HashInfo"):
         """get raw object"""
         return HashFile(
-            # Prefer string path over PathInfo when possible due to performance
             self.hash_to_path(hash_info.value),
             self.fs,
             hash_info,
@@ -77,25 +75,29 @@ class ObjectDB:
 
     def _add_file(
         self,
-        from_fs: "BaseFileSystem",
+        from_fs: "FileSystem",
         from_info: "AnyPath",
-        to_info: "DvcPath",
+        to_info: "AnyPath",
         _hash_info: "HashInfo",
-        move: bool = False,
+        hardlink: bool = False,
     ):
         from dvc import fs
 
-        self.makedirs(to_info.parent)
+        self.makedirs(self.fs.path.parent(to_info))
         return fs.utils.transfer(
-            from_fs, from_info, self.fs, to_info, move=move
+            from_fs,
+            from_info,
+            self.fs,
+            to_info,
+            hardlink=hardlink,
         )
 
     def add(
         self,
-        path_info: "AnyPath",
-        fs: "BaseFileSystem",
+        fs_path: "AnyPath",
+        fs: "FileSystem",
         hash_info: "HashInfo",
-        move: bool = True,
+        hardlink: bool = False,
         verify: Optional[bool] = None,
     ):
         if self.read_only:
@@ -109,35 +111,32 @@ class ObjectDB:
         except (ObjectFormatError, FileNotFoundError):
             pass
 
-        cache_info = self.hash_to_path_info(hash_info.value)
-        self._add_file(fs, path_info, cache_info, hash_info, move=move)
+        cache_fs_path = self.hash_to_path(hash_info.value)
+        self._add_file(
+            fs, fs_path, cache_fs_path, hash_info, hardlink=hardlink
+        )
 
         try:
             if verify:
                 self.check(hash_info, check_hash=True)
-            self.protect(cache_info)
-            self.state.save(cache_info, self.fs, hash_info)
+            self.protect(cache_fs_path)
+            self.state.save(cache_fs_path, self.fs, hash_info)
         except (ObjectFormatError, FileNotFoundError):
             pass
 
-    def hash_to_path_info(self, hash_) -> "DvcPath":
-        return self.path_info / hash_[0:2] / hash_[2:]
-
-    # Override to return path as a string instead of PathInfo for clouds
-    # which support string paths (see local)
     def hash_to_path(self, hash_):
-        return self.hash_to_path_info(hash_)
+        return self.fs.path.join(self.fs_path, hash_[0:2], hash_[2:])
 
-    def protect(self, path_info):  # pylint: disable=unused-argument
+    def protect(self, fs_path):  # pylint: disable=unused-argument
         pass
 
-    def is_protected(self, path_info):  # pylint: disable=unused-argument
+    def is_protected(self, fs_path):  # pylint: disable=unused-argument
         return False
 
-    def unprotect(self, path_info):  # pylint: disable=unused-argument
+    def unprotect(self, fs_path):  # pylint: disable=unused-argument
         pass
 
-    def set_exec(self, path_info):  # pylint: disable=unused-argument
+    def set_exec(self, fs_path):  # pylint: disable=unused-argument
         pass
 
     def check(
@@ -160,52 +159,54 @@ class ObjectDB:
         """
 
         obj = self.get(hash_info)
-        if self.is_protected(obj.path_info):
+        if self.is_protected(obj.fs_path):
             logger.trace(  # type: ignore[attr-defined]
                 "Assuming '%s' is unchanged since it is read-only",
-                obj.path_info,
+                obj.fs_path,
             )
             return
 
         try:
             obj.check(self, check_hash=check_hash)
         except ObjectFormatError:
-            logger.warning("corrupted cache file '%s'.", obj.path_info)
+            logger.warning("corrupted cache file '%s'.", obj.fs_path)
             with suppress(FileNotFoundError):
-                self.fs.remove(obj.path_info)
+                self.fs.remove(obj.fs_path)
             raise
 
         if check_hash:
             # making cache file read-only so we don't need to check it
             # next time
-            self.protect(obj.path_info)
+            self.protect(obj.fs_path)
 
     def _list_paths(self, prefix=None, progress_callback=None):
         if prefix:
             if len(prefix) > 2:
-                path_info = self.path_info / prefix[:2] / prefix[2:]
+                fs_path = self.fs.path.join(
+                    self.fs_path, prefix[:2], prefix[2:]
+                )
             else:
-                path_info = self.path_info / prefix[:2]
+                fs_path = self.fs.path.join(self.fs_path, prefix[:2])
             prefix = True
         else:
-            path_info = self.path_info
+            fs_path = self.fs_path
             prefix = False
         if progress_callback:
-            for file_info in self.fs.walk_files(path_info, prefix=prefix):
+            for file_info in self.fs.find(fs_path, prefix=prefix):
                 progress_callback()
-                yield file_info.path
+                yield file_info
         else:
-            yield from self.fs.walk_files(path_info, prefix=prefix)
+            yield from self.fs.find(fs_path, prefix=prefix)
 
     def _path_to_hash(self, path):
-        parts = self.fs.PATH_CLS(path).parts[-2:]
+        parts = self.fs.path.parts(path)[-2:]
 
         if not (len(parts) == 2 and parts[0] and len(parts[0]) == 2):
             raise ValueError(f"Bad cache file path '{path}'")
 
         return "".join(parts)
 
-    def list_hashes(self, prefix=None, progress_callback=None):
+    def _list_hashes(self, prefix=None, progress_callback=None):
         """Iterate over hashes in this fs.
 
         If `prefix` is specified, only hashes which begin with `prefix`
@@ -221,12 +222,12 @@ class ObjectDB:
 
     def _hashes_with_limit(self, limit, prefix=None, progress_callback=None):
         count = 0
-        for hash_ in self.list_hashes(prefix, progress_callback):
+        for hash_ in self._list_hashes(prefix, progress_callback):
             yield hash_
             count += 1
             if count > limit:
                 logger.debug(
-                    "`list_hashes()` returned max '{}' hashes, "
+                    "`_list_hashes()` returned max '{}' hashes, "
                     "skipping remaining results".format(limit)
                 )
                 return
@@ -265,7 +266,7 @@ class ObjectDB:
                     max_hashes / total_prefixes, prefix, update
                 )
             else:
-                hashes = self.list_hashes(prefix, update)
+                hashes = self._list_hashes(prefix, update)
 
             remote_hashes = set(hashes)
             if remote_hashes:
@@ -275,7 +276,7 @@ class ObjectDB:
             logger.debug(f"Estimated remote size: {remote_size} files")
         return remote_size, remote_hashes
 
-    def list_hashes_traverse(
+    def _list_hashes_traverse(
         self, remote_size, remote_hashes, jobs=None, name=None
     ):
         """Iterate over all hashes found in this fs.
@@ -321,7 +322,7 @@ class ObjectDB:
 
             def list_with_update(prefix):
                 return list(
-                    self.list_hashes(
+                    self._list_hashes(
                         prefix=prefix, progress_callback=pbar.update
                     )
                 )
@@ -345,10 +346,10 @@ class ObjectDB:
         )
 
         if not self.fs.CAN_TRAVERSE:
-            return self.list_hashes()
+            return self._list_hashes()
 
         remote_size, remote_hashes = self._estimate_remote_size(name=name)
-        return self.list_hashes_traverse(
+        return self._list_hashes_traverse(
             remote_size, remote_hashes, jobs, name
         )
 
@@ -371,21 +372,26 @@ class ObjectDB:
                     entry_obj.hash_info.value for _, entry_obj in tree
                 )
 
+        def _is_dir_hash(_hash):
+            from dvc.hash_info import HASH_DIR_SUFFIX
+
+            return _hash.endswith(HASH_DIR_SUFFIX)
+
         removed = False
         # hashes must be sorted to ensure we always remove .dir files first
         for hash_ in sorted(
-            self.all(jobs, str(self.path_info)),
-            key=self.fs.is_dir_hash,
+            self.all(jobs, self.fs_path),
+            key=_is_dir_hash,
             reverse=True,
         ):
             if hash_ in used_hashes:
                 continue
-            path_info = self.hash_to_path_info(hash_)
-            if self.fs.is_dir_hash(hash_):
+            fs_path = self.hash_to_path(hash_)
+            if _is_dir_hash(hash_):
                 # backward compatibility
                 # pylint: disable=protected-access
                 self._remove_unpacked_dir(hash_)
-            self.fs.remove(path_info)
+            self.fs.remove(fs_path)
             removed = True
 
         return removed
@@ -402,16 +408,16 @@ class ObjectDB:
             unit="file",
         ) as pbar:
 
-            def exists_with_progress(path_info):
-                ret = self.fs.exists(path_info)
-                pbar.update_msg(str(path_info))
+            def exists_with_progress(fs_path):
+                ret = self.fs.exists(fs_path)
+                pbar.update_msg(fs_path)
                 return ret
 
             with ThreadPoolExecutor(
                 max_workers=jobs or self.fs.jobs
             ) as executor:
-                path_infos = map(self.hash_to_path_info, hashes)
-                in_remote = executor.map(exists_with_progress, path_infos)
+                fs_paths = map(self.hash_to_path, hashes)
+                in_remote = executor.map(exists_with_progress, fs_paths)
                 ret = list(itertools.compress(hashes, in_remote))
                 return ret
 
@@ -454,7 +460,7 @@ class ObjectDB:
 
         # During the tests, for ensuring that the traverse behavior
         # is working we turn on this option. It will ensure the
-        # list_hashes_traverse() is called.
+        # _list_hashes_traverse() is called.
         always_traverse = getattr(self.fs, "_ALWAYS_TRAVERSE", False)
 
         hashes = set(hashes)
@@ -491,6 +497,6 @@ class ObjectDB:
 
         logger.debug(f"Querying '{len(hashes)}' hashes via traverse")
         remote_hashes = set(
-            self.list_hashes_traverse(remote_size, remote_hashes, jobs, name)
+            self._list_hashes_traverse(remote_size, remote_hashes, jobs, name)
         )
         return list(hashes & set(remote_hashes))

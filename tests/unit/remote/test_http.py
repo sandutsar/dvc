@@ -1,22 +1,14 @@
 import ssl
 
-import pytest
 from mock import patch
 
 from dvc.fs.http import HTTPFileSystem
 
 
-def test_download_fails_on_error_code(tmp_dir, http):
-    fs = HTTPFileSystem(**http.config)
-
-    with pytest.raises(FileNotFoundError):
-        fs.download_file(http / "missing.txt", tmp_dir / "missing.txt")
-
-
 def test_public_auth_method(dvc):
     config = {
         "url": "http://example.com/",
-        "path_info": "file.html",
+        "path": "file.html",
         "user": "",
         "password": "",
     }
@@ -32,7 +24,7 @@ def test_basic_auth_method(dvc):
     password = "password"
     config = {
         "url": "http://example.com/",
-        "path_info": "file.html",
+        "path": "file.html",
         "auth": "basic",
         "user": user,
         "password": password,
@@ -49,7 +41,7 @@ def test_custom_auth_method(dvc):
     password = "password"
     config = {
         "url": "http://example.com/",
-        "path_info": "file.html",
+        "path": "file.html",
         "auth": "custom",
         "custom_auth_header": header,
         "password": password,
@@ -65,7 +57,7 @@ def test_custom_auth_method(dvc):
 def test_ssl_verify_disable(dvc):
     config = {
         "url": "http://example.com/",
-        "path_info": "file.html",
+        "path": "file.html",
         "ssl_verify": False,
     }
 
@@ -77,7 +69,7 @@ def test_ssl_verify_disable(dvc):
 def test_ssl_verify_custom_cert(dvc, mocker):
     config = {
         "url": "http://example.com/",
-        "path_info": "file.html",
+        "path": "file.html",
         "ssl_verify": "/path/to/custom/cabundle.pem",
     }
 
@@ -91,7 +83,7 @@ def test_ssl_verify_custom_cert(dvc, mocker):
 def test_http_method(dvc):
     config = {
         "url": "http://example.com/",
-        "path_info": "file.html",
+        "path": "file.html",
     }
 
     fs = HTTPFileSystem(**config, method="PUT")

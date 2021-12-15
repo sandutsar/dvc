@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from rich.text import Text as RichText
 
     from dvc.progress import Tqdm
+    from dvc.types import StrPath
     from dvc.ui.table import Headers, Styles, TableData
 
 
@@ -84,21 +85,35 @@ class Console:
         )
 
     def write_json(
-        self, data: Any, indent: int = 2, default: Callable = None
+        self,
+        data: Any,
+        indent: int = None,
+        highlight: bool = None,
+        stderr: bool = False,
+        skip_keys: bool = False,
+        ensure_ascii: bool = True,
+        check_circular: bool = True,
+        allow_nan: bool = True,
+        default: Optional[Callable[[Any], Any]] = None,
+        sort_keys: bool = False,
     ) -> None:
-        import json
+        if highlight is None:
+            highlight = self.isatty()
+        if indent is None and self.isatty():
+            indent = 2
 
-        if self.isatty():
-            from rich.highlighter import JSONHighlighter
-
-            j = json.dumps(data, indent=indent, default=default)
-            highlighter = JSONHighlighter()
-            text = highlighter(j)
-            text.no_wrap = True
-            text.overflow = None
-            return self.write(text, styled=True)
-
-        return self.write(json.dumps(data))
+        console = self.error_console if stderr else self.rich_console
+        return console.print_json(
+            data=data,
+            indent=indent,
+            highlight=bool(highlight),
+            skip_keys=skip_keys,
+            ensure_ascii=ensure_ascii,
+            check_circular=check_circular,
+            allow_nan=allow_nan,
+            default=default,
+            sort_keys=sort_keys,
+        )
 
     def write(
         self,
@@ -245,6 +260,28 @@ class Console:
         import sys
 
         return sys.stdout.isatty()
+
+    def open_browser(self, file: "StrPath") -> int:
+        import webbrowser
+        from pathlib import Path
+        from platform import uname
+
+        from dvc.utils import relpath
+
+        path = Path(file).resolve()
+        url = (
+            relpath(path) if "Microsoft" in uname().release else path.as_uri()
+        )
+
+        opened = webbrowser.open(url)
+
+        if not opened:
+            ui.error_write(
+                f"Failed to open {url}. " "Please try opening it manually."
+            )
+            return 1
+
+        return 0
 
 
 ui = Console()

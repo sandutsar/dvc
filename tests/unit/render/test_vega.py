@@ -3,20 +3,18 @@ import os
 from collections import OrderedDict
 
 import pytest
+from funcy import first
 
-from dvc.render.utils import find_vega, group_by_filename
+from dvc.render.utils import group_by_filename
 from dvc.render.vega import (
     INDEX_FIELD,
     REVISION_FIELD,
+    BadTemplateError,
     VegaRenderer,
     _find_data,
     _lists,
 )
-from dvc.repo.plots.template import (
-    BadTemplateError,
-    NoFieldInDataError,
-    TemplateNotFoundError,
-)
+from dvc.repo.plots.template import NoFieldInDataError, TemplateNotFoundError
 
 
 @pytest.mark.parametrize(
@@ -109,18 +107,19 @@ def test_one_column(tmp_dir, scm, dvc):
         }
     }
 
-    plot_string = VegaRenderer(data, dvc.plots.templates).get_vega()
+    plot_content = VegaRenderer(data, dvc.plots.templates).asdict()
 
-    plot_content = json.loads(plot_string)
     assert plot_content["title"] == "mytitle"
     assert plot_content["data"]["values"] == [
         {"val": 2, INDEX_FIELD: 0, REVISION_FIELD: "workspace"},
         {"val": 3, INDEX_FIELD: 1, REVISION_FIELD: "workspace"},
     ]
-    assert plot_content["encoding"]["x"]["field"] == INDEX_FIELD
-    assert plot_content["encoding"]["y"]["field"] == "val"
-    assert plot_content["encoding"]["x"]["title"] == "x_title"
-    assert plot_content["encoding"]["y"]["title"] == "y_title"
+    assert (
+        first(plot_content["layer"])["encoding"]["x"]["field"] == INDEX_FIELD
+    )
+    assert first(plot_content["layer"])["encoding"]["y"]["field"] == "val"
+    assert first(plot_content["layer"])["encoding"]["x"]["title"] == "x_title"
+    assert first(plot_content["layer"])["encoding"]["y"]["title"] == "y_title"
 
 
 def test_multiple_columns(tmp_dir, scm, dvc):
@@ -133,9 +132,8 @@ def test_multiple_columns(tmp_dir, scm, dvc):
         "workspace": {"data": {"file.json": {"data": metric, "props": {}}}}
     }
 
-    plot_string = VegaRenderer(data, dvc.plots.templates).get_vega()
+    plot_content = VegaRenderer(data, dvc.plots.templates).asdict()
 
-    plot_content = json.loads(plot_string)
     assert plot_content["data"]["values"] == [
         {
             "val": 2,
@@ -152,8 +150,10 @@ def test_multiple_columns(tmp_dir, scm, dvc):
             "second_val": 300,
         },
     ]
-    assert plot_content["encoding"]["x"]["field"] == INDEX_FIELD
-    assert plot_content["encoding"]["y"]["field"] == "val"
+    assert (
+        first(plot_content["layer"])["encoding"]["x"]["field"] == INDEX_FIELD
+    )
+    assert first(plot_content["layer"])["encoding"]["y"]["field"] == "val"
 
 
 def test_choose_axes(tmp_dir, scm, dvc):
@@ -167,9 +167,8 @@ def test_choose_axes(tmp_dir, scm, dvc):
     data = {
         "workspace": {"data": {"file.json": {"data": metric, "props": props}}}
     }
-    plot_string = VegaRenderer(data, dvc.plots.templates).get_vega()
+    plot_content = VegaRenderer(data, dvc.plots.templates).asdict()
 
-    plot_content = json.loads(plot_string)
     assert plot_content["data"]["values"] == [
         {
             "val": 2,
@@ -184,8 +183,12 @@ def test_choose_axes(tmp_dir, scm, dvc):
             "second_val": 300,
         },
     ]
-    assert plot_content["encoding"]["x"]["field"] == "first_val"
-    assert plot_content["encoding"]["y"]["field"] == "second_val"
+    assert (
+        first(plot_content["layer"])["encoding"]["x"]["field"] == "first_val"
+    )
+    assert (
+        first(plot_content["layer"])["encoding"]["y"]["field"] == "second_val"
+    )
 
 
 def test_confusion(tmp_dir, dvc):
@@ -201,9 +204,8 @@ def test_confusion(tmp_dir, dvc):
         }
     }
 
-    plot_string = VegaRenderer(data, dvc.plots.templates).get_vega()
+    plot_content = VegaRenderer(data, dvc.plots.templates).asdict()
 
-    plot_content = json.loads(plot_string)
     assert plot_content["data"]["values"] == [
         {"predicted": "B", "actual": "A", REVISION_FIELD: "workspace"},
         {"predicted": "A", "actual": "A", REVISION_FIELD: "workspace"},
@@ -239,9 +241,8 @@ def test_multiple_revs_default(tmp_dir, scm, dvc):
         },
     }
 
-    plot_string = VegaRenderer(data, dvc.plots.templates).get_vega()
+    plot_content = VegaRenderer(data, dvc.plots.templates).asdict()
 
-    plot_content = json.loads(plot_string)
     assert plot_content["data"]["values"] == [
         {"y": 5, INDEX_FIELD: 0, REVISION_FIELD: "HEAD"},
         {"y": 6, INDEX_FIELD: 1, REVISION_FIELD: "HEAD"},
@@ -250,8 +251,10 @@ def test_multiple_revs_default(tmp_dir, scm, dvc):
         {"y": 2, INDEX_FIELD: 0, REVISION_FIELD: "v1"},
         {"y": 3, INDEX_FIELD: 1, REVISION_FIELD: "v1"},
     ]
-    assert plot_content["encoding"]["x"]["field"] == INDEX_FIELD
-    assert plot_content["encoding"]["y"]["field"] == "y"
+    assert (
+        first(plot_content["layer"])["encoding"]["x"]["field"] == INDEX_FIELD
+    )
+    assert first(plot_content["layer"])["encoding"]["y"]["field"] == "y"
 
 
 def test_metric_missing(tmp_dir, scm, dvc, caplog):
@@ -263,15 +266,16 @@ def test_metric_missing(tmp_dir, scm, dvc, caplog):
             "data": {"file.json": {"error": FileNotFoundError(), "props": {}}}
         },
     }
-    plot_string = VegaRenderer(data, dvc.plots.templates).get_vega()
+    plot_content = VegaRenderer(data, dvc.plots.templates).asdict()
 
-    plot_content = json.loads(plot_string)
     assert plot_content["data"]["values"] == [
         {"y": 2, INDEX_FIELD: 0, REVISION_FIELD: "v2"},
         {"y": 3, INDEX_FIELD: 1, REVISION_FIELD: "v2"},
     ]
-    assert plot_content["encoding"]["x"]["field"] == INDEX_FIELD
-    assert plot_content["encoding"]["y"]["field"] == "y"
+    assert (
+        first(plot_content["layer"])["encoding"]["x"]["field"] == INDEX_FIELD
+    )
+    assert first(plot_content["layer"])["encoding"]["y"]["field"] == "y"
 
 
 def test_custom_template(tmp_dir, scm, dvc, custom_template):
@@ -281,9 +285,8 @@ def test_custom_template(tmp_dir, scm, dvc, custom_template):
         "workspace": {"data": {"file.json": {"data": metric, "props": props}}}
     }
 
-    plot_string = VegaRenderer(data, dvc.plots.templates).get_vega()
+    plot_content = VegaRenderer(data, dvc.plots.templates).asdict()
 
-    plot_content = json.loads(plot_string)
     assert plot_content["data"]["values"] == [
         {"a": 1, "b": 2, REVISION_FIELD: "workspace"},
         {"a": 2, "b": 3, REVISION_FIELD: "workspace"},
@@ -300,7 +303,7 @@ def test_raise_on_no_template(tmp_dir, dvc):
     }
 
     with pytest.raises(TemplateNotFoundError):
-        VegaRenderer(data, dvc.plots.templates).get_vega()
+        VegaRenderer(data, dvc.plots.templates).asdict()
 
 
 def test_bad_template(tmp_dir, dvc):
@@ -312,7 +315,7 @@ def test_bad_template(tmp_dir, dvc):
     }
 
     with pytest.raises(BadTemplateError):
-        VegaRenderer(data, dvc.plots.templates).get_vega()
+        VegaRenderer(data, dvc.plots.templates).asdict()
 
 
 def test_plot_choose_columns(tmp_dir, scm, dvc, custom_template):
@@ -327,9 +330,8 @@ def test_plot_choose_columns(tmp_dir, scm, dvc, custom_template):
         "workspace": {"data": {"file.json": {"data": metric, "props": props}}}
     }
 
-    plot_string = VegaRenderer(data, dvc.plots.templates).get_vega()
+    plot_content = VegaRenderer(data, dvc.plots.templates).asdict()
 
-    plot_content = json.loads(plot_string)
     assert plot_content["data"]["values"] == [
         {"b": 2, "c": 3, REVISION_FIELD: "workspace"},
         {"b": 3, "c": 4, REVISION_FIELD: "workspace"},
@@ -346,15 +348,16 @@ def test_plot_default_choose_column(tmp_dir, scm, dvc):
         }
     }
 
-    plot_string = VegaRenderer(data, dvc.plots.templates).get_vega()
-    plot_content = json.loads(plot_string)
+    plot_content = VegaRenderer(data, dvc.plots.templates).asdict()
 
     assert plot_content["data"]["values"] == [
         {INDEX_FIELD: 0, "b": 2, REVISION_FIELD: "workspace"},
         {INDEX_FIELD: 1, "b": 3, REVISION_FIELD: "workspace"},
     ]
-    assert plot_content["encoding"]["x"]["field"] == INDEX_FIELD
-    assert plot_content["encoding"]["y"]["field"] == "b"
+    assert (
+        first(plot_content["layer"])["encoding"]["x"]["field"] == INDEX_FIELD
+    )
+    assert first(plot_content["layer"])["encoding"]["y"]["field"] == "b"
 
 
 def test_raise_on_wrong_field(tmp_dir, scm, dvc):
@@ -366,7 +369,7 @@ def test_raise_on_wrong_field(tmp_dir, scm, dvc):
     }
 
     with pytest.raises(NoFieldInDataError):
-        VegaRenderer(data, dvc.plots.templates).get_vega()
+        VegaRenderer(data, dvc.plots.templates).asdict()
 
 
 @pytest.mark.parametrize(
@@ -391,46 +394,44 @@ def test_matches(extension, matches):
     assert VegaRenderer.matches(data) == matches
 
 
-def test_find_vega(tmp_dir, dvc):
+@pytest.mark.parametrize(
+    "template_path, target_name",
+    [
+        (os.path.join(".dvc", "plots", "template.json"), "template"),
+        (os.path.join(".dvc", "plots", "template.json"), "template.json"),
+        (
+            os.path.join(".dvc", "plots", "subdir", "template.json"),
+            os.path.join("subdir", "template.json"),
+        ),
+        (
+            os.path.join(".dvc", "plots", "subdir", "template.json"),
+            os.path.join("subdir", "template"),
+        ),
+        ("template.json", "template.json"),
+    ],
+)
+def test_should_resolve_template(tmp_dir, dvc, template_path, target_name):
+    os.makedirs(os.path.abspath(os.path.dirname(template_path)), exist_ok=True)
+    with open(template_path, "w", encoding="utf-8") as fd:
+        fd.write("template_content")
+
+    assert dvc.plots.templates.get_template(target_name) == os.path.abspath(
+        template_path
+    )
+
+
+def test_as_json(tmp_dir, scm, dvc):
+    metric = [{"a": 1, "b": 2, "c": 3}, {"a": 2, "b": 3, "c": 4}]
     data = {
-        "HEAD": {
-            "data": {
-                "file.json": {
-                    "data": [{"y": 5}, {"y": 6}],
-                    "props": {"fields": {"y"}},
-                },
-                "other_file.jpg": {"data": b"content"},
-            }
-        },
-        "v2": {
-            "data": {
-                "file.json": {
-                    "data": [{"y": 3}, {"y": 5}],
-                    "props": {"fields": {"y"}},
-                },
-                "other_file.jpg": {"data": b"content2"},
-            }
-        },
-        "v1": {
-            "data": {
-                "file.json": {
-                    "data": [{"y": 2}, {"y": 3}],
-                    "props": {"fields": {"y"}},
-                },
-                "another.gif": {"data": b"content2"},
-            }
-        },
+        "workspace": {
+            "data": {"file.json": {"data": metric, "props": {"fields": {"b"}}}}
+        }
     }
 
-    plot_content = json.loads(find_vega(dvc, data, "file.json"))
+    renderer = VegaRenderer(data, dvc.plots.templates)
+    plot_content = renderer.asdict()
+    plot_as_json = first(json.loads(renderer.as_json()))
 
-    assert plot_content["data"]["values"] == [
-        {"y": 5, INDEX_FIELD: 0, REVISION_FIELD: "HEAD"},
-        {"y": 6, INDEX_FIELD: 1, REVISION_FIELD: "HEAD"},
-        {"y": 3, INDEX_FIELD: 0, REVISION_FIELD: "v2"},
-        {"y": 5, INDEX_FIELD: 1, REVISION_FIELD: "v2"},
-        {"y": 2, INDEX_FIELD: 0, REVISION_FIELD: "v1"},
-        {"y": 3, INDEX_FIELD: 1, REVISION_FIELD: "v1"},
-    ]
-    assert plot_content["encoding"]["x"]["field"] == INDEX_FIELD
-    assert plot_content["encoding"]["y"]["field"] == "y"
+    assert plot_as_json["type"] == "vega"
+    assert plot_as_json["revisions"] == ["workspace"]
+    assert plot_as_json["content"] == plot_content

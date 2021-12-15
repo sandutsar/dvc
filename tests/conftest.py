@@ -3,6 +3,8 @@ from contextlib import suppress
 
 import pytest
 
+from dvc.testing.fixtures import *  # noqa, pylint: disable=wildcard-import
+
 from .dir_helpers import *  # noqa, pylint: disable=wildcard-import
 from .remotes import *  # noqa, pylint: disable=wildcard-import
 from .utils.scriptify import scriptify
@@ -19,7 +21,8 @@ REMOTES = {
     "azure": False,
     "gdrive": False,
     "gs": False,
-    "hdfs": False,
+    "hdfs": True,
+    "real_hdfs": False,
     "http": True,
     "oss": False,
     "s3": False,
@@ -160,11 +163,25 @@ def pytest_configure(config):
 
 @pytest.fixture()
 def custom_template(tmp_dir, dvc):
-    import shutil
+    try:
+        import importlib_resources
+    except ImportError:
+        import importlib.resources as importlib_resources
+
+    content = (
+        importlib_resources.files("dvc.repo.plots")
+        / "templates"
+        / "simple.json"
+    ).read_text()
 
     template = tmp_dir / "custom_template.json"
-    shutil.copy(tmp_dir / ".dvc" / "plots" / "default.json", template)
+    template.write_text(content)
     return template
 
 
 scriptify_fixture = pytest.fixture(lambda: scriptify, name="scriptify")
+
+
+@pytest.fixture(autouse=True)
+def mocked_webbrowser_open(mocker):
+    mocker.patch("webbrowser.open")

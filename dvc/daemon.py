@@ -12,8 +12,6 @@ from dvc.utils import fix_env, is_binary
 
 logger = logging.getLogger(__name__)
 
-CREATE_NO_WINDOW = 0x08000000  # only available since Python 3.7 in subprocess.
-
 
 def _popen(cmd, **kwargs):
     prefix = [sys.executable]
@@ -28,6 +26,7 @@ def _popen(cmd, **kwargs):
 def _spawn_windows(cmd, env):
     from subprocess import (
         CREATE_NEW_PROCESS_GROUP,
+        CREATE_NO_WINDOW,
         STARTF_USESHOWWINDOW,
         STARTUPINFO,
     )
@@ -49,17 +48,17 @@ def _spawn_posix(cmd, env):
     # with PyInstaller has trouble with SystemExit exception and throws
     # errors such as "[26338] Failed to execute script __main__"
     try:
-        pid = os.fork()
+        pid = os.fork()  # pylint: disable=no-member
         if pid > 0:
             return
     except OSError:
         logger.exception("failed at first fork")
         os._exit(1)  # pylint: disable=protected-access
 
-    os.setsid()
+    os.setsid()  # pylint: disable=no-member
 
     try:
-        pid = os.fork()
+        pid = os.fork()  # pylint: disable=no-member
         if pid > 0:
             os._exit(0)  # pylint: disable=protected-access
     except OSError:

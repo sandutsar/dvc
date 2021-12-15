@@ -1,12 +1,13 @@
 import threading
+from typing import Any
 
 from funcy import cached_property, memoize, wrap_with
 
 from dvc import prompt
-from dvc.path_info import HTTPURLInfo
+from dvc.progress import DEFAULT_CALLBACK
 from dvc.scheme import Schemes
 
-from .fsspec_wrapper import FSSpecWrapper, NoDirectoriesMixin
+from .fsspec_wrapper import AnyFSPath, FSSpecWrapper, NoDirectoriesMixin
 
 
 @wrap_with(threading.Lock())
@@ -34,7 +35,6 @@ def make_context(ssl_verify):
 # pylint: disable=abstract-method
 class HTTPFileSystem(NoDirectoriesMixin, FSSpecWrapper):
     scheme = Schemes.HTTP
-    PATH_CLS = HTTPURLInfo
     PARAM_CHECKSUM = "checksum"
     REQUIRES = {"aiohttp": "aiohttp", "aiohttp-retry": "aiohttp_retry"}
     CAN_TRAVERSE = False
@@ -127,6 +127,15 @@ class HTTPFileSystem(NoDirectoriesMixin, FSSpecWrapper):
 
         return _HTTPFileSystem(**self.fs_args)
 
-    def _entry_hook(self, entry):
-        entry["checksum"] = entry.get("ETag") or entry.get("Content-MD5")
-        return entry
+    def unstrip_protocol(self, path: str) -> str:
+        return path
+
+    def put_file(
+        self,
+        from_file: AnyFSPath,
+        to_info: AnyFSPath,
+        callback: Any = DEFAULT_CALLBACK,
+        **kwargs,
+    ) -> None:
+        kwargs.setdefault("method", self.upload_method)
+        super().put_file(from_file, to_info, callback=callback, **kwargs)

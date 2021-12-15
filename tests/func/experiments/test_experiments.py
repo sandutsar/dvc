@@ -7,7 +7,9 @@ import pytest
 from funcy import first
 
 from dvc.dvcfile import PIPELINE_FILE
+from dvc.exceptions import DvcException
 from dvc.repo.experiments.utils import exp_refs_by_rev
+from dvc.scm import resolve_rev
 from dvc.utils.serialize import PythonFileCorruptedError
 from tests.func.test_repro_multistage import COPY_SCRIPT
 
@@ -30,7 +32,7 @@ def test_new_simple(tmp_dir, scm, dvc, exp_stage, mocker, name, workspace):
 
     new_mock.assert_called_once()
     fs = scm.get_fs(exp)
-    with fs.open(tmp_dir / "metrics.yaml") as fobj:
+    with fs.open(tmp_dir / "metrics.yaml", mode="r", encoding="utf-8") as fobj:
         assert fobj.read().strip() == "foo: 2"
 
     if workspace:
@@ -38,7 +40,7 @@ def test_new_simple(tmp_dir, scm, dvc, exp_stage, mocker, name, workspace):
 
     exp_name = name if name else ref_info.name
     assert dvc.experiments.get_exact_name(exp) == exp_name
-    assert scm.resolve_rev(exp_name) == exp
+    assert resolve_rev(scm, exp_name) == exp
 
 
 @pytest.mark.parametrize("workspace", [True, False])
@@ -52,6 +54,7 @@ def test_experiment_exists(tmp_dir, scm, dvc, exp_stage, mocker, workspace):
         tmp_dir=not workspace,
     )
 
+    new_mock = mocker.spy(dvc.experiments, "_stash_exp")
     with pytest.raises(ExperimentExistsError):
         dvc.experiments.run(
             exp_stage.addressing,
@@ -59,6 +62,7 @@ def test_experiment_exists(tmp_dir, scm, dvc, exp_stage, mocker, workspace):
             params=["foo=3"],
             tmp_dir=not workspace,
         )
+    new_mock.assert_not_called()
 
     results = dvc.experiments.run(
         exp_stage.addressing,
@@ -70,7 +74,7 @@ def test_experiment_exists(tmp_dir, scm, dvc, exp_stage, mocker, workspace):
     exp = first(results)
 
     fs = scm.get_fs(exp)
-    with fs.open(tmp_dir / "metrics.yaml") as fobj:
+    with fs.open(tmp_dir / "metrics.yaml", mode="r", encoding="utf-8") as fobj:
         assert fobj.read().strip() == "foo: 3"
 
 
@@ -118,10 +122,6 @@ def test_failed_exp(tmp_dir, scm, dvc, exp_stage, mocker, caplog):
             ["foo[1]=[baz, goo]"],
             "{foo: [bar: 1, [baz, goo]], goo: {bag: 3}, lorem: false}",
         ],
-        [
-            ["lorem.ipsum=3"],
-            "{foo: [bar: 1, baz: 2], goo: {bag: 3}, lorem: {ipsum: 3}}",
-        ],
     ],
 )
 def test_modify_params(tmp_dir, scm, dvc, mocker, changes, expected):
@@ -144,8 +144,30 @@ def test_modify_params(tmp_dir, scm, dvc, mocker, changes, expected):
 
     new_mock.assert_called_once()
     fs = scm.get_fs(exp)
-    with fs.open(tmp_dir / "metrics.yaml") as fobj:
+    with fs.open(tmp_dir / "metrics.yaml", mode="r") as fobj:
         assert fobj.read().strip() == expected
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [["lorem.ipsum=3"], ["foo[0].bazar=3"]],
+)
+def test_add_params(tmp_dir, scm, dvc, changes):
+    tmp_dir.gen("copy.py", COPY_SCRIPT)
+    tmp_dir.gen(
+        "params.yaml", "{foo: [bar: 1, baz: 2], goo: {bag: 3}, lorem: false}"
+    )
+    stage = dvc.run(
+        cmd="python copy.py params.yaml metrics.yaml",
+        metrics_no_cache=["metrics.yaml"],
+        params=["foo", "goo", "lorem"],
+        name="copy-file",
+    )
+    scm.add(["dvc.yaml", "dvc.lock", "copy.py", "params.yaml", "metrics.yaml"])
+    scm.commit("init")
+
+    with pytest.raises(DvcException):
+        dvc.experiments.run(stage.addressing, params=changes)
 
 
 @pytest.mark.parametrize("queue", [True, False])
@@ -240,9 +262,9 @@ def test_update_py_params(tmp_dir, scm, dvc):
     exp_a = first(results)
 
     fs = scm.get_fs(exp_a)
-    with fs.open(tmp_dir / "params.py") as fobj:
+    with fs.open(tmp_dir / "params.py", mode="r", encoding="utf-8") as fobj:
         assert fobj.read().strip() == "INT = 2"
-    with fs.open(tmp_dir / "metrics.py") as fobj:
+    with fs.open(tmp_dir / "metrics.py", mode="r", encoding="utf-8") as fobj:
         assert fobj.read().strip() == "INT = 2"
 
     tmp_dir.gen(
@@ -286,9 +308,9 @@ def test_update_py_params(tmp_dir, scm, dvc):
         return text.replace("\r\n", "\n")
 
     fs = scm.get_fs(exp_a)
-    with fs.open(tmp_dir / "params.py") as fobj:
+    with fs.open(tmp_dir / "params.py", mode="r", encoding="utf-8") as fobj:
         assert _dos2unix(fobj.read().strip()) == result
-    with fs.open(tmp_dir / "metrics.py") as fobj:
+    with fs.open(tmp_dir / "metrics.py", mode="r", encoding="utf-8") as fobj:
         assert _dos2unix(fobj.read().strip()) == result
 
     tmp_dir.gen("params.py", "INT = 1\n")
@@ -365,7 +387,7 @@ def test_branch(tmp_dir, scm, dvc, exp_stage):
 
 def test_no_scm(tmp_dir):
     from dvc.repo import Repo as DvcRepo
-    from dvc.scm.base import NoSCMError
+    from dvc.scm import NoSCMError
 
     dvc = DvcRepo.init(no_scm=True)
 
@@ -387,7 +409,7 @@ def test_no_scm(tmp_dir):
 @pytest.mark.parametrize("workspace", [True, False])
 def test_untracked(tmp_dir, scm, dvc, caplog, workspace):
     tmp_dir.gen("copy.py", COPY_SCRIPT)
-    tmp_dir.gen("params.yaml", "foo: 1")
+    tmp_dir.scm_gen("params.yaml", "foo: 1", commit="track params")
     stage = dvc.run(
         cmd="python copy.py params.yaml metrics.yaml",
         metrics_no_cache=["metrics.yaml"],
@@ -415,7 +437,7 @@ def test_untracked(tmp_dir, scm, dvc, caplog, workspace):
     assert fs.exists("dvc.yaml")
     assert fs.exists("dvc.lock")
     assert fs.exists("copy.py")
-    with fs.open(tmp_dir / "metrics.yaml") as fobj:
+    with fs.open(tmp_dir / "metrics.yaml", mode="r", encoding="utf-8") as fobj:
         assert fobj.read().strip() == "foo: 2"
 
 
@@ -493,11 +515,11 @@ def test_subdir(tmp_dir, scm, dvc, workspace):
     fs = scm.get_fs(exp)
     for fname in ["metrics.yaml", "dvc.lock"]:
         assert fs.exists(subdir / fname)
-    with fs.open(subdir / "metrics.yaml") as fobj:
+    with fs.open(subdir / "metrics.yaml", mode="r", encoding="utf-8") as fobj:
         assert fobj.read().strip() == "foo: 2"
 
     assert dvc.experiments.get_exact_name(exp) == ref_info.name
-    assert scm.resolve_rev(ref_info.name) == exp
+    assert resolve_rev(scm, ref_info.name) == exp
 
 
 @pytest.mark.parametrize("workspace", [True, False])
@@ -538,11 +560,11 @@ def test_subrepo(tmp_dir, scm, workspace):
     fs = scm.get_fs(exp)
     for fname in ["metrics.yaml", "dvc.lock"]:
         assert fs.exists(subrepo / fname)
-    with fs.open(subrepo / "metrics.yaml") as fobj:
+    with fs.open(subrepo / "metrics.yaml", mode="r", encoding="utf-8") as fobj:
         assert fobj.read().strip() == "foo: 2"
 
     assert subrepo.dvc.experiments.get_exact_name(exp) == ref_info.name
-    assert scm.resolve_rev(ref_info.name) == exp
+    assert resolve_rev(scm, ref_info.name) == exp
 
 
 def test_queue(tmp_dir, scm, dvc, exp_stage, mocker):
@@ -559,7 +581,9 @@ def test_queue(tmp_dir, scm, dvc, exp_stage, mocker):
     metrics = set()
     for exp in results:
         fs = scm.get_fs(exp)
-        with fs.open(tmp_dir / "metrics.yaml") as fobj:
+        with fs.open(
+            tmp_dir / "metrics.yaml", mode="r", encoding="utf-8"
+        ) as fobj:
             metrics.add(fobj.read().strip())
     assert expected == metrics
 
@@ -649,9 +673,9 @@ def test_modified_data_dep(tmp_dir, scm, dvc, workspace, params, target):
     for rev in dvc.brancher(revs=[exp]):
         if rev != exp:
             continue
-        with dvc.repo_fs.open(tmp_dir / "metrics.yaml") as fobj:
+        with dvc.repo_fs.open((tmp_dir / "metrics.yaml").fs_path) as fobj:
             assert fobj.read().strip() == params
-        with dvc.repo_fs.open(tmp_dir / "data") as fobj:
+        with dvc.repo_fs.open((tmp_dir / "data").fs_path) as fobj:
             assert fobj.read().strip() == "modified"
 
     if workspace:
@@ -666,3 +690,16 @@ def test_exp_run_recursive(tmp_dir, scm, dvc, run_copy_metrics):
     )
     assert dvc.experiments.run(".", recursive=True)
     assert (tmp_dir / "metric.json").parse() == {"foo": 1}
+
+
+def test_experiment_name_invalid(tmp_dir, scm, dvc, exp_stage, mocker):
+    from dvc.exceptions import InvalidArgumentError
+
+    new_mock = mocker.spy(dvc.experiments, "_stash_exp")
+    with pytest.raises(InvalidArgumentError):
+        dvc.experiments.run(
+            exp_stage.addressing,
+            name="fo^o",
+            params=["foo=3"],
+        )
+    new_mock.assert_not_called()

@@ -13,7 +13,7 @@ def digest(text):
 
 
 def test_no_scm(tmp_dir, dvc):
-    from dvc.scm.base import NoSCMError
+    from dvc.scm import NoSCMError
 
     tmp_dir.dvc_gen("file", "text")
 
@@ -26,6 +26,28 @@ def test_added(tmp_dir, scm, dvc):
 
     assert dvc.diff() == {
         "added": [{"path": "file", "hash": digest("text")}],
+        "deleted": [],
+        "modified": [],
+        "not in cache": [],
+        "renamed": [],
+    }
+
+
+def test_added_deep(tmp_dir, scm, dvc):
+    tmp_dir.gen({"datas": {"data": {"file": "text"}}})
+    dvc.add(os.path.join("datas", "data"))
+
+    assert dvc.diff() == {
+        "added": [
+            {
+                "path": os.path.join("datas", "data" + os.sep),
+                "hash": "0dab3fae569586d4c33272e5011605bf.dir",
+            },
+            {
+                "path": os.path.join("datas", "data", "file"),
+                "hash": "1cb251ec0d568de6a929b520c4aed8d1",
+            },
+        ],
         "deleted": [],
         "modified": [],
         "not in cache": [],
@@ -268,8 +290,9 @@ def test_no_changes(tmp_dir, scm, dvc):
 
 
 def test_no_commits(tmp_dir):
+    from scmrepo.git import Git
+
     from dvc.repo import Repo
-    from dvc.scm.git import Git
     from tests.dir_helpers import git_init
 
     git_init(".")
@@ -440,6 +463,7 @@ def test_diff_add_similar_files(tmp_dir, scm, dvc, commit_last):
         {"dir2": {"file": "text1", "subdir": {"file2": "text2"}}},
         commit=last_commit_msg,
     )
+
     assert dvc.diff(a_rev) == {
         "added": [
             {

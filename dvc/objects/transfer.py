@@ -20,9 +20,9 @@ logger = logging.getLogger(__name__)
 
 def _log_exceptions(func):
     @wraps(func)
-    def wrapper(path_info, *args, **kwargs):
+    def wrapper(fs_path, *args, **kwargs):
         try:
-            func(path_info, *args, **kwargs)
+            func(fs_path, *args, **kwargs)
             return 0
         except Exception as exc:  # pylint: disable=broad-except
             # NOTE: this means we ran out of file descriptors and there is no
@@ -31,7 +31,7 @@ def _log_exceptions(func):
             if isinstance(exc, OSError) and exc.errno == errno.EMFILE:
                 raise
 
-            logger.exception("failed to transfer '%s'", path_info)
+            logger.exception("failed to transfer '%s'", fs_path)
             return 1
 
     return wrapper
@@ -74,7 +74,7 @@ def _do_transfer(
         dir_obj = find_tree_by_obj_id([cache_odb, src], dir_hash)
         assert dir_obj
 
-        entry_ids = {entry.hash_info for _, entry in dir_obj}
+        entry_ids = {oid for _, _, oid in dir_obj}
         bound_file_ids = all_file_ids & entry_ids
         all_file_ids -= entry_ids
 
@@ -87,8 +87,8 @@ def _do_transfer(
             )
             logger.error(
                 "failed to upload '%s' to '%s'",
-                src.get(dir_obj.hash_info).path_info,
-                dest.get(dir_obj.hash_info).path_info,
+                src.get(dir_obj.hash_info).fs_path,
+                dest.get(dir_obj.hash_info).fs_path,
             )
             total_fails += dir_fails + 1
         elif entry_ids.intersection(missing_ids):
@@ -117,7 +117,7 @@ def _do_transfer(
     # index successfully pushed dirs
     if dest_index:
         for dir_obj in succeeded_dir_objs:
-            file_hashes = {entry.hash_info.value for _, entry in dir_obj}
+            file_hashes = {oid.value for _, _, oid in dir_obj}
             logger.debug(
                 "Indexing pushed dir '%s' with '%s' nested files",
                 dir_obj.hash_info,
@@ -133,7 +133,7 @@ def transfer(
     obj_ids: Iterable["HashInfo"],
     jobs: Optional[int] = None,
     verify: bool = False,
-    move: bool = False,
+    hardlink: bool = False,
     **kwargs,
 ) -> int:
     """Transfer (copy) the specified objects from one ODB to another.
@@ -144,8 +144,8 @@ def transfer(
 
     logger.debug(
         "Preparing to transfer data from '%s' to '%s'",
-        src.path_info,
-        dest.path_info,
+        src.fs_path,
+        dest.fs_path,
     )
     if src == dest:
         return 0
@@ -157,7 +157,11 @@ def transfer(
     def func(hash_info: "HashInfo") -> None:
         obj = src.get(hash_info)
         return dest.add(
-            obj.path_info, obj.fs, obj.hash_info, verify=verify, move=move
+            obj.fs_path,
+            obj.fs,
+            obj.hash_info,
+            verify=verify,
+            hardlink=hardlink,
         )
 
     total = len(status.new)

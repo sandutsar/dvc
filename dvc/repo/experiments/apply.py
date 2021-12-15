@@ -3,7 +3,6 @@ import os
 
 from dvc.repo import locked
 from dvc.repo.scm_context import scm_context
-from dvc.scm.base import RevError
 from dvc.utils.fs import remove
 
 from .base import (
@@ -20,13 +19,15 @@ logger = logging.getLogger(__name__)
 @locked
 @scm_context
 def apply(repo, rev, force=True, **kwargs):
+    from scmrepo.exceptions import MergeConflictError
+
     from dvc.repo.checkout import checkout as dvc_checkout
-    from dvc.scm.base import MergeConflictError, SCMError
+    from dvc.scm import RevError, SCMError, resolve_rev
 
     exps = repo.experiments
 
     try:
-        exp_rev = repo.scm.resolve_rev(rev)
+        exp_rev = resolve_rev(repo.scm, rev)
         exps.check_baseline(exp_rev)
     except (RevError, BaselineMismatchError) as exc:
         raise InvalidExpRevError(rev) from exc
@@ -45,7 +46,12 @@ def apply(repo, rev, force=True, **kwargs):
     else:
         workspace = None
 
-    repo.scm.merge(exp_rev, commit=False)
+    from scmrepo.exceptions import SCMError as _SCMError
+
+    try:
+        repo.scm.merge(exp_rev, commit=False)
+    except _SCMError as exc:
+        raise SCMError(str(exc))
 
     if workspace:
         try:
@@ -60,7 +66,7 @@ def apply(repo, rev, force=True, **kwargs):
                 repo.scm.reset(hard=True)
                 repo.scm.stash.pop()
                 raise ApplyConflictError(rev) from exc
-        except SCMError as exc:
+        except _SCMError as exc:
             raise ApplyConflictError(rev) from exc
         repo.scm.stash.drop()
     repo.scm.reset()

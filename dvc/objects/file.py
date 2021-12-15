@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Optional
 from .errors import ObjectFormatError
 
 if TYPE_CHECKING:
-    from dvc.fs.base import BaseFileSystem
+    from dvc.fs.base import FileSystem
     from dvc.hash_info import HashInfo
     from dvc.types import AnyPath
 
@@ -18,19 +18,15 @@ logger = logging.getLogger(__name__)
 class HashFile:
     def __init__(
         self,
-        path_info: Optional["AnyPath"],
-        fs: Optional["BaseFileSystem"],
+        fs_path: Optional["AnyPath"],
+        fs: Optional["FileSystem"],
         hash_info: "HashInfo",
         name: Optional[str] = None,
     ):
-        self.path_info = path_info
+        self.fs_path = fs_path
         self.fs = fs
         self.hash_info = hash_info
         self.name = name
-
-    @property
-    def size(self):
-        return self.hash_info.size
 
     def __len__(self):
         return 1
@@ -45,7 +41,7 @@ class HashFile:
         if not isinstance(other, HashFile):
             return False
         return (
-            self.path_info == other.path_info
+            self.fs_path == other.fs_path
             and self.fs == other.fs
             and self.hash_info == other.hash_info
         )
@@ -54,7 +50,7 @@ class HashFile:
         return hash(
             (
                 self.hash_info,
-                self.path_info,
+                self.fs_path,
                 self.fs.scheme if self.fs else None,
             )
         )
@@ -62,9 +58,9 @@ class HashFile:
     def check(self, odb: "ObjectDB", check_hash: bool = True):
         if not check_hash:
             assert self.fs
-            if not self.fs.exists(self.path_info):
+            if not self.fs.exists(self.fs_path):
                 raise FileNotFoundError(
-                    errno.ENOENT, os.strerror(errno.ENOENT), self.path_info
+                    errno.ENOENT, os.strerror(errno.ENOENT), self.fs_path
                 )
             else:
                 return None
@@ -74,13 +70,13 @@ class HashFile:
     def _check_hash(self, odb):
         from .stage import get_file_hash
 
-        actual = get_file_hash(
-            self.path_info, self.fs, self.hash_info.name, odb.state
+        _, actual = get_file_hash(
+            self.fs_path, self.fs, self.hash_info.name, odb.state
         )
 
         logger.trace(
             "cache '%s' expected '%s' actual '%s'",
-            self.path_info,
+            self.fs_path,
             self.hash_info,
             actual,
         )

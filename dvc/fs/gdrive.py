@@ -1,14 +1,10 @@
 import logging
 import os
-import posixpath
-import re
 import threading
-from urllib.parse import urlparse
 
-from funcy import cached_property, retry, wrap_prop
+from funcy import cached_property, wrap_prop
 
 from dvc.exceptions import DvcException
-from dvc.path_info import CloudURLInfo
 from dvc.scheme import Schemes
 from dvc.utils import format_link, tmp_fname
 
@@ -34,54 +30,8 @@ class GDriveAuthError(DvcException):
         super().__init__(message)
 
 
-def _gdrive_retry(func):
-    def should_retry(exc):
-        from pydrive2.files import ApiRequestError
-
-        if not isinstance(exc, ApiRequestError):
-            return False
-
-        error_code = exc.error.get("code", 0)
-        result = False
-        if 500 <= error_code < 600:
-            result = True
-
-        if error_code == 403:
-            result = exc.GetField("reason") in [
-                "userRateLimitExceeded",
-                "rateLimitExceeded",
-            ]
-        if result:
-            logger.debug(f"Retrying GDrive API call, error: {exc}.")
-
-        return result
-
-    # 16 tries, start at 0.5s, multiply by golden ratio, cap at 20s
-    return retry(
-        16,
-        timeout=lambda a: min(0.5 * 1.618 ** a, 20),
-        filter_errors=should_retry,
-    )(func)
-
-
-class GDriveURLInfo(CloudURLInfo):
-    def __init__(self, url):
-        super().__init__(url)
-
-        # GDrive URL host part is case sensitive,
-        # we are restoring it here.
-        p = urlparse(url)
-        self.host = p.netloc
-        assert self.netloc == self.host
-
-        # Normalize path. Important since we have a cache (path to ID)
-        # and don't want to deal with different variations of path in it.
-        self._spath = re.sub("/{2,}", "/", self._spath.rstrip("/"))
-
-
 class GDriveFileSystem(FSSpecWrapper):  # pylint:disable=abstract-method
     scheme = Schemes.GDRIVE
-    PATH_CLS = GDriveURLInfo
     PARAM_CHECKSUM = "checksum"
     REQUIRES = {"pydrive2": "pydrive2"}
     # Always prefer traverse for GDrive since API usage quotas are a concern.
@@ -95,11 +45,14 @@ class GDriveFileSystem(FSSpecWrapper):  # pylint:disable=abstract-method
     DEFAULT_GDRIVE_CLIENT_SECRET = "a1Fz59uTpVNeG_VGuSKDLJXv"
 
     def __init__(self, **config):
+        from fsspec.utils import infer_storage_options
+
         super().__init__(**config)
 
-        self.path_info = self.PATH_CLS(config["url"])
+        self.url = config["url"]
+        opts = infer_storage_options(self.url)
 
-        if not self.path_info.bucket:
+        if not opts["host"]:
             raise DvcException(
                 "Empty GDrive URL '{}'. Learn more at {}".format(
                     config["url"],
@@ -107,8 +60,8 @@ class GDriveFileSystem(FSSpecWrapper):  # pylint:disable=abstract-method
                 )
             )
 
-        self._bucket = self.path_info.bucket
-        self._path = self.path_info.path
+        self._bucket = opts["host"]
+        self._path = opts["path"].lstrip("/")
         self._trash_only = config.get("gdrive_trash_only")
         self._use_service_account = config.get("gdrive_use_service_account")
         self._service_account_user_email = config.get(
@@ -135,6 +88,17 @@ class GDriveFileSystem(FSSpecWrapper):  # pylint:disable=abstract-method
                 os.path.join(tmp_dir, self.DEFAULT_USER_CREDENTIALS_FILE),
             )
         )
+
+    @classmethod
+    def _strip_protocol(cls, path):
+        from fsspec.utils import infer_storage_options
+
+        opts = infer_storage_options(path)
+
+        return "{host}{path}".format(**opts)
+
+    def unstrip_protocol(self, path):
+        return f"gdrive://{path}"
 
     @staticmethod
     def _get_kwargs_from_urls(urlpath):
@@ -219,7 +183,7 @@ class GDriveFileSystem(FSSpecWrapper):  # pylint:disable=abstract-method
             temporary_save_path = self._gdrive_service_credentials_path
 
         if is_credentials_temp:
-            with open(temporary_save_path, "w") as cred_file:
+            with open(temporary_save_path, "w", encoding="utf-8") as cred_file:
                 cred_file.write(
                     os.getenv(GDriveFileSystem.GDRIVE_CREDENTIALS_DATA)
                 )
@@ -285,27 +249,11 @@ class GDriveFileSystem(FSSpecWrapper):  # pylint:disable=abstract-method
                 os.remove(temporary_save_path)
 
         return _GDriveFileSystem(
-            self._with_bucket(self.path_info),
+            f"{self._bucket}/{self._path}",
             gauth,
             trash_only=self._trash_only,
         )
 
-    def _with_bucket(self, path):
-        if isinstance(path, self.PATH_CLS):
-            return posixpath.join(path.bucket, path.path)
-
-        return super()._with_bucket(path)
-
-    def _strip_bucket(self, entry):
-        try:
-            bucket, path = entry.split("/", 1)
-        except ValueError:
-            # If there is no path attached, only returns
-            # the bucket (top-level).
-            bucket, path = entry, None
-        return path or bucket
-
     def upload_fobj(self, fobj, to_info, **kwargs):
-        rpath = self._with_bucket(to_info)
-        self.makedirs(os.path.dirname(rpath))
-        return self.fs.upload_fobj(fobj, rpath, **kwargs)
+        self.makedirs(os.path.dirname(to_info))
+        return self.fs.upload_fobj(fobj, to_info, **kwargs)

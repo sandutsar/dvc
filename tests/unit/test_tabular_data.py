@@ -177,3 +177,90 @@ def test_row_from_dict():
         ["", "", "value3", "value4", "", ""],
         ["", "", "value3", "", "value5", "value6"],
     ]
+
+
+@pytest.mark.parametrize(
+    "axis,how,data,expected",
+    [
+        (
+            "rows",
+            "any",
+            [["foo"], ["foo", "bar"], ["foo", "bar", "foobar"]],
+            [
+                ["foo", "bar", "foobar"],
+            ],
+        ),
+        (
+            "rows",
+            "all",
+            [["foo"], ["foo", "bar"], ["", "", ""]],
+            [
+                ["foo", "", ""],
+                ["foo", "bar", ""],
+            ],
+        ),
+        (
+            "cols",
+            "any",
+            [["foo"], ["foo", "bar"], ["foo", "bar", "foobar"]],
+            [["foo"], ["foo"], ["foo"]],
+        ),
+        (
+            "cols",
+            "all",
+            [["foo"], ["foo", "bar"], ["", "", ""]],
+            [["foo", ""], ["foo", "bar"], ["", ""]],
+        ),
+    ],
+)
+def test_dropna(axis, how, data, expected):
+    td = TabularData(["col-1", "col-2", "col-3"])
+    td.extend(data)
+    td.dropna(axis, how)
+    assert list(td) == expected
+
+
+@pytest.mark.parametrize(
+    "axis,expected",
+    [
+        (
+            "rows",
+            [
+                ["foo", "", ""],
+                ["foo", "foo", ""],
+                ["foo", "bar", "foobar"],
+            ],
+        ),
+        ("cols", [[""], ["foo"], ["foo"], ["bar"]]),
+    ],
+)
+def test_drop_duplicates(axis, expected):
+    td = TabularData(["col-1", "col-2", "col-3"])
+    td.extend(
+        [["foo"], ["foo", "foo"], ["foo", "foo"], ["foo", "bar", "foobar"]]
+    )
+
+    assert list(td) == [
+        ["foo", "", ""],
+        ["foo", "foo", ""],
+        ["foo", "foo", ""],
+        ["foo", "bar", "foobar"],
+    ]
+
+    td.drop_duplicates(axis)
+
+    assert list(td) == expected
+
+
+def test_dropna_invalid_axis():
+    td = TabularData(["col-1", "col-2", "col-3"])
+
+    with pytest.raises(ValueError, match="Invalid 'axis' value foo."):
+        td.dropna("foo")
+
+
+def test_drop_duplicates_invalid_axis():
+    td = TabularData(["col-1", "col-2", "col-3"])
+
+    with pytest.raises(ValueError, match="Invalid 'axis' value foo."):
+        td.drop_duplicates("foo")

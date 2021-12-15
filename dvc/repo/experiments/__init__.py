@@ -1,36 +1,39 @@
 import logging
 import os
 import re
-import signal
-from collections import defaultdict, namedtuple
-from concurrent.futures import CancelledError, ProcessPoolExecutor, wait
 from functools import wraps
-from multiprocessing import Manager
-from typing import Dict, Iterable, Mapping, Optional
+from typing import Dict, Iterable, List, Mapping, Optional, Type
 
 from funcy import cached_property, first
 
+from dvc.dependency.param import MissingParamsError
 from dvc.env import DVCLIVE_RESUME
 from dvc.exceptions import DvcException
-from dvc.path_info import PathInfo
-from dvc.stage.monitor import CheckpointKilledError
 from dvc.utils import relpath
 
 from .base import (
     EXEC_APPLY,
-    EXEC_BASELINE,
     EXEC_BRANCH,
     EXEC_CHECKPOINT,
-    EXEC_HEAD,
-    EXEC_MERGE,
     EXEC_NAMESPACE,
     EXPS_NAMESPACE,
     EXPS_STASH,
     BaselineMismatchError,
-    CheckpointExistsError,
     ExperimentExistsError,
     ExpRefInfo,
+    ExpStashEntry,
     MultipleBranchError,
+)
+from .executor.base import (
+    EXEC_PID_DIR,
+    EXEC_TMP_DIR,
+    BaseExecutor,
+    ExecutorInfo,
+)
+from .executor.manager import (
+    BaseExecutorManager,
+    TempDirExecutorManager,
+    WorkspaceExecutorManager,
 )
 from .utils import exp_refs_by_rev
 
@@ -42,7 +45,9 @@ def scm_locked(f):
     # different sequences of git operations at once
     @wraps(f)
     def wrapper(exp, *args, **kwargs):
-        with exp.scm_lock:
+        from dvc.scm import map_scm_exception
+
+        with map_scm_exception(), exp.scm_lock:
             return f(exp, *args, **kwargs)
 
     return wrapper
@@ -80,16 +85,10 @@ class Experiments:
         r"^(?P<baseline_rev>[a-f0-9]{7})-(?P<exp_sha>[a-f0-9]+)"
         r"(?P<checkpoint>-checkpoint)?$"
     )
-    EXEC_TMP_DIR = "exps"
-    EXEC_PID_DIR = os.path.join(EXEC_TMP_DIR, "run")
-
-    StashEntry = namedtuple(
-        "StashEntry", ["index", "rev", "baseline_rev", "branch", "name"]
-    )
 
     def __init__(self, repo):
         from dvc.lock import make_lock
-        from dvc.scm.base import NoSCMError
+        from dvc.scm import NoSCMError
 
         if repo.config["core"].get("no_scm", False):
             raise NoSCMError
@@ -98,6 +97,7 @@ class Experiments:
         self.scm_lock = make_lock(
             os.path.join(self.repo.tmp_dir, "exp_scm_lock"),
             tmp_dir=self.repo.tmp_dir,
+            hardlink_lock=repo.config["core"].get("hardlink_lock", False),
         )
 
     @property
@@ -110,24 +110,22 @@ class Experiments:
 
     @cached_property
     def args_file(self):
-        from .executor.base import BaseExecutor
-
         return os.path.join(self.repo.tmp_dir, BaseExecutor.PACKED_ARGS_FILE)
 
     @cached_property
     def stash(self):
-        from dvc.scm.git import Stash
+        from scmrepo.git import Stash
 
         return Stash(self.scm, EXPS_STASH)
 
     @property
-    def stash_revs(self):
+    def stash_revs(self) -> Dict[str, ExpStashEntry]:
         revs = {}
         for i, entry in enumerate(self.stash):
             msg = entry.message.decode("utf-8").strip()
             m = self.STASH_EXPERIMENT_RE.match(msg)
             if m:
-                revs[entry.new_sha.decode("utf-8")] = self.StashEntry(
+                revs[entry.new_sha.decode("utf-8")] = ExpStashEntry(
                     i,
                     m.group("rev"),
                     m.group("baseline_rev"),
@@ -162,7 +160,7 @@ class Experiments:
                 the human-readable name in the experiment branch ref. Has no
                 effect of branch is specified.
         """
-        with self.scm.detach_head() as orig_head:
+        with self.scm.detach_head(client="dvc") as orig_head:
             stash_head = orig_head
             if baseline_rev is None:
                 baseline_rev = orig_head
@@ -322,8 +320,6 @@ class Experiments:
     def _pack_args(self, *args, **kwargs):
         import pickle
 
-        from .executor.base import BaseExecutor
-
         if os.path.exists(self.args_file) and self.scm.is_tracked(
             self.args_file
         ):
@@ -350,19 +346,32 @@ class Experiments:
         )
         self.scm.add(self.args_file)
 
+    def _format_new_params_msg(self, new_params, config_path):
+        """Format an error message for when new parameters are identified"""
+        new_param_count = len(new_params)
+        pluralise = "s are" if new_param_count > 1 else " is"
+        param_list = ", ".join(new_params)
+        return (
+            f"{new_param_count} parameter{pluralise} missing "
+            f"from '{config_path}': {param_list}"
+        )
+
     def _update_params(self, params: dict):
         """Update experiment params files with the specified values."""
-        from dvc.utils.collections import merge_params
+        from dvc.utils.collections import NewParamsFound, merge_params
         from dvc.utils.serialize import MODIFIERS
 
         logger.debug("Using experiment params '%s'", params)
 
-        for params_fname in params:
-            path = PathInfo(params_fname)
-            suffix = path.suffix.lower()
+        for path in params:
+            suffix = self.repo.fs.path.suffix(path).lower()
             modify_data = MODIFIERS[suffix]
             with modify_data(path, fs=self.repo.fs) as data:
-                merge_params(data, params[params_fname])
+                try:
+                    merge_params(data, params[path], allow_new=False)
+                except NewParamsFound as e:
+                    msg = self._format_new_params_msg(e.new_params, path)
+                    raise MissingParamsError(msg)
 
         # Force params file changes to be staged in git
         # Otherwise in certain situations the changes to params file may be
@@ -395,7 +404,9 @@ class Experiments:
                 self.scm.reset()
 
         if checkpoint_resume:
-            resume_rev = self.scm.resolve_rev(checkpoint_resume)
+            from dvc.scm import resolve_rev
+
+            resume_rev = resolve_rev(self.scm, checkpoint_resume)
             try:
                 self.check_baseline(resume_rev)
                 checkpoint_resume = resume_rev
@@ -416,9 +427,14 @@ class Experiments:
             )
             return [stash_rev]
         if tmp_dir or queue:
-            results = self._reproduce_revs(revs=[stash_rev], keep_stash=False)
+            manager_cls: Type = TempDirExecutorManager
         else:
-            results = self._workspace_repro()
+            manager_cls = WorkspaceExecutorManager
+        results = self._reproduce_revs(
+            revs=[stash_rev],
+            keep_stash=False,
+            manager_cls=manager_cls,
+        )
         exp_rev = first(results)
         if exp_rev is not None:
             self._log_reproduced(results, tmp_dir=tmp_dir)
@@ -458,6 +474,17 @@ class Experiments:
             "\tdvc exp branch <exp> <branch>\n"
         )
 
+    def _validate_new_ref(self, exp_ref: ExpRefInfo):
+        from .utils import check_ref_format
+
+        if not exp_ref.name:
+            return
+
+        check_ref_format(self.scm, exp_ref)
+
+        if self.scm.get_ref(str(exp_ref)):
+            raise ExperimentExistsError(exp_ref.name)
+
     @scm_locked
     def new(self, *args, checkpoint_resume: Optional[str] = None, **kwargs):
         """Create a new experiment.
@@ -469,6 +496,16 @@ class Experiments:
             return self._resume_checkpoint(
                 *args, resume_rev=checkpoint_resume, **kwargs
             )
+
+        name = kwargs.get("name", None)
+        baseline_sha = kwargs.get("baseline_rev") or self.repo.scm.get_rev()
+        exp_ref = ExpRefInfo(baseline_sha=baseline_sha, name=name)
+
+        try:
+            self._validate_new_ref(exp_ref)
+        except ExperimentExistsError as err:
+            if not (kwargs.get("force", False) or kwargs.get("reset", False)):
+                raise err
 
         return self._stash_exp(*args, **kwargs)
 
@@ -551,6 +588,7 @@ class Experiments:
         self,
         revs: Optional[Iterable] = None,
         keep_stash: Optional[bool] = True,
+        manager_cls: Type = TempDirExecutorManager,
         **kwargs,
     ) -> Mapping[str, str]:
         """Reproduce the specified experiments.
@@ -578,7 +616,7 @@ class Experiments:
             to_run = {
                 rev: stash_revs[rev]
                 if rev in stash_revs
-                else self.StashEntry(None, rev, rev, None, None)
+                else ExpStashEntry(None, rev, rev, None, None)
                 for rev in revs
             }
 
@@ -587,17 +625,22 @@ class Experiments:
             ", ".join(rev[:7] for rev in to_run),
         )
 
-        executors = self._init_executors(to_run)
+        manager = manager_cls.from_stash_entries(
+            self.scm,
+            os.path.join(self.repo.tmp_dir, EXEC_TMP_DIR),
+            self.repo,
+            to_run,
+        )
         try:
             exec_results = {}
-            exec_results.update(self._executors_repro(executors, **kwargs))
+            exec_results.update(self._executors_repro(manager, **kwargs))
         finally:
             # only drop successfully run stashed experiments
-            to_drop = [
-                entry.index
+            to_drop: List[int] = [
+                entry.stash_index
                 for rev, entry in to_run.items()
                 if (
-                    entry.index is not None
+                    entry.stash_index is not None
                     and (not keep_stash or rev in exec_results)
                 )
             ]
@@ -609,47 +652,11 @@ class Experiments:
             result.update(exp_result)
         return result
 
-    def _init_executors(self, to_run):
-        from dvc.utils.fs import makedirs
-
-        from .executor.local import TempDirExecutor
-
-        executors = {}
-        base_tmp_dir = os.path.join(self.repo.tmp_dir, self.EXEC_TMP_DIR)
-        if not os.path.exists(base_tmp_dir):
-            makedirs(base_tmp_dir)
-        pid_dir = os.path.join(self.repo.tmp_dir, self.EXEC_PID_DIR)
-        if not os.path.exists(pid_dir):
-            makedirs(pid_dir)
-        for stash_rev, item in to_run.items():
-            self.scm.set_ref(EXEC_HEAD, item.rev)
-            self.scm.set_ref(EXEC_MERGE, stash_rev)
-            self.scm.set_ref(EXEC_BASELINE, item.baseline_rev)
-
-            # Executor will be initialized with an empty git repo that
-            # we populate by pushing:
-            #   EXEC_HEAD - the base commit for this experiment
-            #   EXEC_MERGE - the unmerged changes (from our stash)
-            #       to be reproduced
-            #   EXEC_BASELINE - the baseline commit for this experiment
-            executor = TempDirExecutor(
-                self.scm,
-                self.dvc_dir,
-                name=item.name,
-                branch=item.branch,
-                tmp_dir=base_tmp_dir,
-                cache_dir=self.repo.odb.local.cache_dir,
-            )
-            executors[stash_rev] = executor
-
-        for ref in (EXEC_HEAD, EXEC_MERGE, EXEC_BASELINE):
-            self.scm.remove_ref(ref)
-
-        return executors
-
     @unlocked_repo
     def _executors_repro(
-        self, executors: dict, jobs: Optional[int] = 1
+        self,
+        manager: "BaseExecutorManager",
+        **kwargs,
     ) -> Dict[str, Dict[str, str]]:
         """Run dvc repro for the specified BaseExecutors in parallel.
 
@@ -657,171 +664,7 @@ class Experiments:
             dict mapping stash revs to the successfully executed experiments
             for each stash rev.
         """
-        result: Dict[str, Dict[str, str]] = defaultdict(dict)
-
-        manager = Manager()
-        pid_q = manager.Queue()
-
-        rel_cwd = relpath(os.getcwd(), self.repo.root_dir)
-        with ProcessPoolExecutor(max_workers=jobs) as workers:
-            futures = {}
-            for rev, executor in executors.items():
-                pidfile = os.path.join(
-                    self.repo.tmp_dir,
-                    self.EXEC_PID_DIR,
-                    f"{rev}{executor.PIDFILE_EXT}",
-                )
-                future = workers.submit(
-                    executor.reproduce,
-                    executor.dvc_dir,
-                    rev,
-                    queue=pid_q,
-                    name=executor.name,
-                    rel_cwd=rel_cwd,
-                    log_level=logger.getEffectiveLevel(),
-                    pidfile=pidfile,
-                    git_url=executor.git_url,
-                )
-                futures[future] = (rev, executor)
-
-            try:
-                wait(futures)
-            except KeyboardInterrupt:
-                # forward SIGINT to any running executor processes and
-                # cancel any remaining futures
-                workers.shutdown(wait=False)
-                pids = {}
-                for future, (rev, _) in futures.items():
-                    if future.running():
-                        # if future has already been started by the scheduler
-                        # we still have to wait until it tells us its PID
-                        while rev not in pids:
-                            rev, pid = pid_q.get()
-                            pids[rev] = pid
-                        os.kill(pids[rev], signal.SIGINT)
-                    elif not future.done():
-                        future.cancel()
-
-            for future, (rev, executor) in futures.items():
-                rev, executor = futures[future]
-
-                try:
-                    exc = future.exception()
-                    if exc is None:
-                        exec_result = future.result()
-                        result[rev].update(
-                            self._collect_executor(executor, exec_result)
-                        )
-                    elif not isinstance(exc, CheckpointKilledError):
-                        logger.error(
-                            "Failed to reproduce experiment '%s'", rev[:7]
-                        )
-                except CancelledError:
-                    logger.error(
-                        "Cancelled before attempting to reproduce experiment "
-                        "'%s'",
-                        rev[:7],
-                    )
-                finally:
-                    executor.cleanup()
-
-        return result
-
-    def _collect_executor(self, executor, exec_result) -> Mapping[str, str]:
-        # NOTE: GitPython Repo instances cannot be re-used
-        # after process has received SIGINT or SIGTERM, so we
-        # need this hack to re-instantiate git instances after
-        # checkpoint runs. See:
-        # https://github.com/gitpython-developers/GitPython/issues/427
-        del self.repo.scm
-
-        results = {}
-
-        def on_diverged(ref: str, checkpoint: bool):
-            ref_info = ExpRefInfo.from_ref(ref)
-            if checkpoint:
-                raise CheckpointExistsError(ref_info.name)
-            raise ExperimentExistsError(ref_info.name)
-
-        for ref in executor.fetch_exps(
-            self.scm,
-            executor.git_url,
-            force=exec_result.force,
-            on_diverged=on_diverged,
-        ):
-            exp_rev = self.scm.get_ref(ref)
-            if exp_rev:
-                logger.debug("Collected experiment '%s'.", exp_rev[:7])
-                results[exp_rev] = exec_result.exp_hash
-
-        return results
-
-    @unlocked_repo
-    def _workspace_repro(self) -> Mapping[str, str]:
-        """Run the most recently stashed experiment in the workspace."""
-        from dvc.utils.fs import makedirs
-
-        from .executor.base import BaseExecutor
-
-        entry = first(self.stash_revs.values())
-        assert entry.index == 0
-
-        # NOTE: the stash commit to be popped already contains all the current
-        # workspace changes plus CLI modified --params changes.
-        # `checkout --force` here will not lose any data (popping stash commit
-        # will result in conflict between workspace params and stashed CLI
-        # params, but we always want the stashed version).
-        with self.scm.detach_head(entry.rev, force=True):
-            rev = self.stash.pop()
-            self.scm.set_ref(EXEC_BASELINE, entry.baseline_rev)
-            if entry.branch:
-                self.scm.set_ref(EXEC_BRANCH, entry.branch, symbolic=True)
-            elif self.scm.get_ref(EXEC_BRANCH):
-                self.scm.remove_ref(EXEC_BRANCH)
-            try:
-                orig_checkpoint = self.scm.get_ref(EXEC_CHECKPOINT)
-                pid_dir = os.path.join(self.repo.tmp_dir, self.EXEC_PID_DIR)
-                if not os.path.exists(pid_dir):
-                    makedirs(pid_dir)
-                pidfile = os.path.join(
-                    pid_dir, f"workspace{BaseExecutor.PIDFILE_EXT}"
-                )
-                exec_result = BaseExecutor.reproduce(
-                    None,
-                    rev,
-                    name=entry.name,
-                    rel_cwd=relpath(os.getcwd(), self.scm.root_dir),
-                    log_errors=False,
-                    pidfile=pidfile,
-                )
-
-                if not exec_result.exp_hash:
-                    raise DvcException(
-                        f"Failed to reproduce experiment '{rev[:7]}'"
-                    )
-                if not exec_result.ref_info:
-                    # repro succeeded but result matches baseline
-                    # (no experiment generated or applied)
-                    return {}
-                exp_rev = self.scm.get_ref(str(exec_result.ref_info))
-                self.scm.set_ref(EXEC_APPLY, exp_rev)
-                return {exp_rev: exec_result.exp_hash}
-            except CheckpointKilledError:
-                # Checkpoint errors have already been logged
-                return {}
-            except DvcException:
-                raise
-            except Exception as exc:
-                raise DvcException(
-                    f"Failed to reproduce experiment '{rev[:7]}'"
-                ) from exc
-            finally:
-                self.scm.remove_ref(EXEC_BASELINE)
-                if entry.branch:
-                    self.scm.remove_ref(EXEC_BRANCH)
-                checkpoint = self.scm.get_ref(EXEC_CHECKPOINT)
-                if checkpoint and checkpoint != orig_checkpoint:
-                    self.scm.set_ref(EXEC_APPLY, checkpoint)
+        return manager.exec_queue(**kwargs)
 
     def check_baseline(self, exp_rev):
         baseline_sha = self.repo.scm.get_rev()
@@ -844,7 +687,9 @@ class Experiments:
         return self._get_baseline(rev)
 
     def _get_baseline(self, rev):
-        rev = self.scm.resolve_rev(rev)
+        from dvc.scm import resolve_rev
+
+        rev = resolve_rev(self.scm, rev)
 
         if rev in self.stash_revs:
             entry = self.stash_revs.get(rev)
@@ -888,45 +733,55 @@ class Experiments:
 
     def get_running_exps(self) -> Dict[str, int]:
         """Return info for running experiments."""
-        from dvc.utils.serialize import load_yaml
-
-        from .executor.base import BaseExecutor, ExecutorInfo
+        from dvc.scm import InvalidRemoteSCMRepo
+        from dvc.utils.serialize import load_json
 
         result = {}
-        for pidfile in self.repo.fs.walk_files(
-            os.path.join(self.repo.tmp_dir, self.EXEC_PID_DIR)
-        ):
-            rev, _ = os.path.splitext(os.path.basename(pidfile))
+        pid_dir = os.path.join(
+            self.repo.tmp_dir,
+            EXEC_TMP_DIR,
+            EXEC_PID_DIR,
+        )
+        for fname in self.repo.fs.find(pid_dir):
+            rev, ext = os.path.splitext(os.path.basename(fname))
+            if ext != BaseExecutor.INFOFILE_EXT:
+                continue
 
             try:
-                info = ExecutorInfo.from_dict(load_yaml(pidfile))
+                info = ExecutorInfo.from_dict(load_json(fname))
+                if info.result is not None:
+                    continue
                 if rev == "workspace":
                     # If we are appending to a checkpoint branch in a workspace
                     # run, show the latest checkpoint as running.
                     last_rev = self.scm.get_ref(EXEC_BRANCH)
                     if last_rev:
-                        result[last_rev] = info.to_dict()
+                        result[last_rev] = info.asdict()
                     else:
-                        result[rev] = info.to_dict()
+                        result[rev] = info.asdict()
                 else:
-                    result[rev] = info.to_dict()
+                    result[rev] = info.asdict()
                     if info.git_url:
 
                         def on_diverged(_ref: str, _checkpoint: bool):
                             return False
 
-                        for ref in BaseExecutor.fetch_exps(
-                            self.scm,
-                            info.git_url,
-                            on_diverged=on_diverged,
-                        ):
-                            logger.debug(
-                                "Updated running experiment '%s'.", ref
-                            )
-                            last_rev = self.scm.get_ref(ref)
-                            result[rev]["last"] = last_rev
-                            if last_rev:
-                                result[last_rev] = info.to_dict()
+                        try:
+                            for ref in BaseExecutor.fetch_exps(
+                                self.scm,
+                                info.git_url,
+                                on_diverged=on_diverged,
+                            ):
+                                logger.debug(
+                                    "Updated running experiment '%s'.", ref
+                                )
+                                last_rev = self.scm.get_ref(ref)
+                                result[rev]["last"] = last_rev
+                                if last_rev:
+                                    result[last_rev] = info.asdict()
+                        except InvalidRemoteSCMRepo:
+                            # ignore stale info files
+                            del result[rev]
             except OSError:
                 pass
         return result

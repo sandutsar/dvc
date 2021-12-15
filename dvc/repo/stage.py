@@ -20,7 +20,6 @@ from dvc.exceptions import (
     NoOutputOrStageError,
     OutputNotFoundError,
 )
-from dvc.path_info import PathInfo
 from dvc.repo import lock_repo
 from dvc.utils import parse_target, relpath
 
@@ -39,7 +38,7 @@ PIPELINE_FILE = "dvc.yaml"
 
 class StageInfo(NamedTuple):
     stage: "Stage"
-    filter_info: Optional[PathInfo] = None
+    filter_info: Optional[str] = None
 
 
 StageList = List["Stage"]
@@ -131,8 +130,7 @@ class StageLoad:
             force=force,
             **stage_data,
         )
-        scm = self.repo.scm
-        with scm.track_file_changes(config=self.repo.config):
+        with self.repo.scm_context:
             stage.dump(update_lock=update_lock)
             stage.ignore_outs()
 
@@ -393,7 +391,7 @@ class StageLoad:
             target: if not provided, all of the stages without any filters are
                 returned.
                 If `target` is a path to a dvc-tracked output,
-                a (stage, output_path_info) is returned.
+                a (stage, output_path) is returned.
                 Otherwise, the details above for `target` in `collect()`
                 applies.
 
@@ -409,8 +407,7 @@ class StageLoad:
             if not (recursive and self.fs.isdir(target)):
                 try:
                     (out,) = self.repo.find_outs_by_path(target, strict=False)
-                    filter_info = PathInfo(os.path.abspath(target))
-                    return [StageInfo(out.stage, filter_info)]
+                    return [StageInfo(out.stage, os.path.abspath(target))]
                 except OutputNotFoundError:
                     pass
 

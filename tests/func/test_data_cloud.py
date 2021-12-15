@@ -9,126 +9,12 @@ import dvc as dvc_module
 from dvc.external_repo import clean_repos
 from dvc.main import main
 from dvc.stage.exceptions import StageNotFound
-from dvc.utils.fs import move, remove
-
-all_clouds = [
-    pytest.lazy_fixture(cloud)
-    for cloud in [
-        "s3",
-        "gs",
-        "azure",
-        "ssh",
-        "http",
-        "hdfs",
-        "webdav",
-        "webhdfs",
-        "oss",
-        "gdrive",
-    ]
-]
-
-# Clouds that implement the general methods that can be tested
-# for functional tests that require extensive apis (e.g traversing
-# via walk_files())
-full_clouds = [
-    pytest.lazy_fixture(cloud)
-    for cloud in ["s3", "gs", "azure", "ssh", "hdfs"]
-]
+from dvc.testing.test_remote import (  # noqa, pylint: disable=unused-import
+    TestRemote,
+)
+from dvc.utils.fs import remove
 
 
-@pytest.mark.needs_internet
-@pytest.mark.parametrize("remote", all_clouds, indirect=True)
-def test_cloud(tmp_dir, dvc, remote):  # pylint:disable=unused-argument
-    (stage,) = tmp_dir.dvc_gen("foo", "foo")
-    out = stage.outs[0]
-    cache = out.cache_path
-    foo_hash = out.hash_info
-    foo_hashes = out.get_used_objs().get(None, set())
-
-    (stage_dir,) = tmp_dir.dvc_gen(
-        {
-            "data_dir": {
-                "data_sub_dir": {"data_sub": "data_sub"},
-                "data": "data",
-                "empty": "",
-            }
-        }
-    )
-    out_dir = stage_dir.outs[0]
-    cache_dir = out_dir.cache_path
-    dir_hash = out_dir.hash_info
-    dir_hashes = {dir_hash} | {
-        entry_obj.hash_info for _, entry_obj in out_dir.obj
-    }
-
-    def _check_status(status, **kwargs):
-        for key in ("ok", "missing", "new", "deleted"):
-            expected = kwargs.get(key, set())
-            assert expected == set(getattr(status, key))
-
-    # Check status
-    status = dvc.cloud.status(foo_hashes)
-    _check_status(status, new={foo_hash})
-
-    status_dir = dvc.cloud.status(dir_hashes)
-    _check_status(status_dir, new=dir_hashes)
-
-    # Move cache and check status
-    # See issue https://github.com/iterative/dvc/issues/4383 for details
-    backup_dir = dvc.odb.local.cache_dir + ".backup"
-    move(dvc.odb.local.cache_dir, backup_dir)
-    status = dvc.cloud.status(foo_hashes)
-    _check_status(status, missing={foo_hash})
-
-    status_dir = dvc.cloud.status(dir_hashes)
-    _check_status(status_dir, missing=dir_hashes)
-
-    # Restore original cache:
-    remove(dvc.odb.local.cache_dir)
-    move(backup_dir, dvc.odb.local.cache_dir)
-
-    # Push and check status
-    dvc.cloud.push(foo_hashes)
-    assert os.path.exists(cache)
-    assert os.path.isfile(cache)
-
-    dvc.cloud.push(dir_hashes)
-    assert os.path.isfile(cache_dir)
-
-    status = dvc.cloud.status(foo_hashes)
-    _check_status(status, ok={foo_hash})
-
-    status_dir = dvc.cloud.status(dir_hashes)
-    _check_status(status_dir, ok=dir_hashes)
-
-    # Remove and check status
-    remove(dvc.odb.local.cache_dir)
-
-    status = dvc.cloud.status(foo_hashes)
-    _check_status(status, deleted={foo_hash})
-
-    status_dir = dvc.cloud.status(dir_hashes)
-    _check_status(status_dir, deleted=dir_hashes)
-
-    # Pull and check status
-    dvc.cloud.pull(foo_hashes)
-    assert os.path.exists(cache)
-    assert os.path.isfile(cache)
-    with open(cache) as fd:
-        assert fd.read() == "foo"
-
-    dvc.cloud.pull(dir_hashes)
-    assert os.path.isfile(cache_dir)
-
-    status = dvc.cloud.status(foo_hashes)
-    _check_status(status, ok={foo_hash})
-
-    status_dir = dvc.cloud.status(dir_hashes)
-    _check_status(status_dir, ok=dir_hashes)
-
-
-@pytest.mark.needs_internet
-@pytest.mark.parametrize("remote", all_clouds, indirect=True)
 def test_cloud_cli(tmp_dir, dvc, remote):
     args = ["-v", "-j", "2"]
 
@@ -168,7 +54,7 @@ def test_cloud_cli(tmp_dir, dvc, remote):
     assert os.path.isfile("foo")
     assert os.path.isdir("data_dir")
 
-    with open(cache) as fd:
+    with open(cache, encoding="utf-8") as fd:
         assert fd.read() == "foo"
     assert os.path.isfile(cache_dir)
 
@@ -450,7 +336,7 @@ def test_pipeline_file_target_ops(tmp_dir, dvc, run_copy, local_remote):
     assert set(dvc.pull()["added"]) == set(outs)
 
     # clean everything in remote and push
-    from tests.dir_helpers import TmpDir
+    from dvc.testing.tmp_dir import TmpDir
 
     clean(TmpDir(path).iterdir())
     dvc.push(["dvc.yaml:copy-ipsum-baz"])
@@ -568,46 +454,6 @@ def test_pull_partial(tmp_dir, dvc, local_remote):
     stats = dvc.pull(os.path.join("foo", "bar"))
     assert stats["fetched"] == 1
     assert (tmp_dir / "foo").read_text() == {"bar": {"baz": "baz"}}
-
-
-@pytest.mark.parametrize("remote", full_clouds, indirect=True)
-def test_pull_00_prefix(tmp_dir, dvc, remote, monkeypatch):
-    # Related: https://github.com/iterative/dvc/issues/6089
-
-    fs_type = type(dvc.cloud.get_remote_odb("upstream").fs)
-    monkeypatch.setattr(fs_type, "_ALWAYS_TRAVERSE", True, raising=False)
-    monkeypatch.setattr(fs_type, "LIST_OBJECT_PAGE_SIZE", 256, raising=False)
-
-    # foo's md5 checksum is 00411460f7c92d2124a67ea0f4cb5f85
-    # bar's md5 checksum is 0000000018e6137ac2caab16074784a6
-    tmp_dir.dvc_gen({"foo": "363", "bar": "jk8ssl"})
-
-    dvc.push()
-    clean(["foo", "bar"], dvc)
-
-    stats = dvc.pull()
-    assert stats["fetched"] == 2
-    assert set(stats["added"]) == {"foo", "bar"}
-
-
-@pytest.mark.parametrize("remote", full_clouds, indirect=True)
-def test_pull_no_00_prefix(tmp_dir, dvc, remote, monkeypatch):
-    # Related: https://github.com/iterative/dvc/issues/6244
-
-    fs_type = type(dvc.cloud.get_remote_odb("upstream").fs)
-    monkeypatch.setattr(fs_type, "_ALWAYS_TRAVERSE", True, raising=False)
-    monkeypatch.setattr(fs_type, "LIST_OBJECT_PAGE_SIZE", 256, raising=False)
-
-    # foo's md5 checksum is 14ffd92a6cbf5f2f657067df0d5881a6
-    # bar's md5 checksum is 64020400f00960c0ef04052547b134b3
-    tmp_dir.dvc_gen({"foo": "dvc", "bar": "cml"})
-
-    dvc.push()
-    clean(["foo", "bar"], dvc)
-
-    stats = dvc.pull()
-    assert stats["fetched"] == 2
-    assert set(stats["added"]) == {"foo", "bar"}
 
 
 def test_output_remote(tmp_dir, dvc, make_remote):

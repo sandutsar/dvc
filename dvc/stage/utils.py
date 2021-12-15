@@ -5,8 +5,8 @@ from typing import TYPE_CHECKING, Union
 from funcy import concat, first, lsplit, rpartial, without
 
 from dvc.exceptions import InvalidArgumentError
+from dvc.objects.meta import Meta
 
-from ..hash_info import HashInfo
 from .exceptions import (
     MissingDataSource,
     StageExternalOutputsError,
@@ -142,8 +142,8 @@ def check_no_externals(stage):
 def check_circular_dependency(stage):
     from dvc.exceptions import CircularDependencyError
 
-    circular_dependencies = {d.path_info for d in stage.deps} & {
-        o.path_info for o in stage.outs
+    circular_dependencies = {d.fs_path for d in stage.deps} & {
+        o.fs_path for o in stage.outs
     }
 
     if circular_dependencies:
@@ -155,7 +155,7 @@ def check_duplicated_arguments(stage):
 
     from dvc.exceptions import ArgumentDuplicationError
 
-    path_counts = Counter(edge.path_info for edge in stage.deps + stage.outs)
+    path_counts = Counter(edge.fs_path for edge in stage.deps + stage.outs)
 
     for path, occurrence in path_counts.items():
         if occurrence > 1:
@@ -197,8 +197,8 @@ def compute_md5(stage):
             Output.PARAM_PERSIST,
             Output.PARAM_CHECKPOINT,
             Output.PARAM_ISEXEC,
-            HashInfo.PARAM_SIZE,
-            HashInfo.PARAM_NFILES,
+            Meta.PARAM_SIZE,
+            Meta.PARAM_NFILES,
         ],
     )
 

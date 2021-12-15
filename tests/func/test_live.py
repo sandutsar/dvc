@@ -10,19 +10,24 @@ from dvc.render.utils import get_files
 
 LIVE_SCRIPT = dedent(
     """
-        import dvclive
+        from dvclive import Live
+        from PIL import Image
+
         import sys
         r = 2
+        metrics_logger = Live()
         for i in range(r):
-           dvclive.log("loss", 1-i/r)
-           dvclive.log("accuracy", i/r)
-           dvclive.next_step()"""
+           metrics_logger.log("loss", 1-i/r)
+           metrics_logger.log("accuracy", i/r)
+           image = Image.new("RGB", (10,10), (i,i,i))
+           metrics_logger.log("image.jpg", image)
+           metrics_logger.next_step()"""
 )
 
 LIVE_CHECKPOINT_SCRIPT = dedent(
     """
             import os
-            import dvclive
+            from dvclive import Live
 
             def read(path):
                 value=0
@@ -40,15 +45,16 @@ LIVE_CHECKPOINT_SCRIPT = dedent(
 
             r = 3
             checkpoint_file = "checkpoint"
+            metrics_logger = Live()
 
             value = read(checkpoint_file)
             for i in range(1,r):
                 m = i + value
                 dump(m, checkpoint_file)
 
-                dvclive.log("metric1", m)
-                dvclive.log("metric2", m * 2)
-                dvclive.next_step()"""
+                metrics_logger.log("metric1", m)
+                metrics_logger.log("metric2", m * 2)
+                metrics_logger.next_step()"""
 )
 
 
@@ -127,6 +133,8 @@ def test_live_provides_metrics(tmp_dir, dvc, live_stage):
     files = get_files(plots_data)
     assert os.path.join("logs", "accuracy.tsv") in files
     assert os.path.join("logs", "loss.tsv") in files
+    assert os.path.join("logs", "0", "image.jpg") in files
+    assert os.path.join("logs", "1", "image.jpg") in files
 
 
 def test_live_provides_no_metrics(tmp_dir, dvc, live_stage):
@@ -235,6 +243,7 @@ def test_live_checkpoints_resume(
 
 def test_dvc_generates_html_during_run(tmp_dir, dvc, mocker, live_stage):
     show_spy = mocker.spy(dvc.live, "show")
+    webbrowser_open = mocker.patch("dvc.repo.live.webbrowser_open")
 
     # make sure script takes more time to execute than one monitor sleep cycle
     monitor_await_time = 0.01
@@ -242,12 +251,13 @@ def test_dvc_generates_html_during_run(tmp_dir, dvc, mocker, live_stage):
 
     script = dedent(
         """
-        import dvclive
+        from dvclive import Live
         import sys
         import time
-        dvclive.log("loss", 1/2)
-        dvclive.log("accuracy", 1/2)
-        dvclive.next_step()
+        metrics_logger = Live()
+        metrics_logger.log("loss", 1/2)
+        metrics_logger.log("accuracy", 1/2)
+        metrics_logger.next_step()
         time.sleep({})""".format(
             str(monitor_await_time * 10)
         )
@@ -255,6 +265,7 @@ def test_dvc_generates_html_during_run(tmp_dir, dvc, mocker, live_stage):
     live_stage(summary=True, live="logs", code=script)
 
     assert show_spy.call_count == 2
+    assert webbrowser_open.call_count == 2
 
 
 def test_dvclive_stage_with_different_wdir(tmp_dir, scm, dvc):

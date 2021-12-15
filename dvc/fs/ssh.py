@@ -34,12 +34,17 @@ class SSHFileSystem(FSSpecWrapper):
     DEFAULT_PORT = 22
     PARAM_CHECKSUM = "md5"
 
-    def _with_bucket(self, path):
-        if isinstance(path, self.PATH_CLS):
-            path_str = path.path
-        else:
-            path_str = super()._with_bucket(path)
-        return path_str
+    @classmethod
+    def _strip_protocol(cls, path: str) -> str:
+        from fsspec.utils import infer_storage_options
+
+        return infer_storage_options(path)["path"]
+
+    def unstrip_protocol(self, path: str) -> str:
+        host = self.fs_args["host"]
+        port = self.fs_args["port"]
+        path = path.lstrip("/")
+        return f"ssh://{host}:{port}/{path}"
 
     def _prepare_credentials(self, **config):
         self.CAN_TRAVERSE = True

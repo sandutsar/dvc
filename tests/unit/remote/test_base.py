@@ -1,11 +1,11 @@
 import math
+import posixpath
 from unittest import mock
 
 import pytest
 
-from dvc.fs.base import BaseFileSystem, RemoteCmdError
+from dvc.fs.base import FileSystem, RemoteCmdError
 from dvc.objects.db.base import ObjectDB
-from dvc.path_info import PathInfo
 
 
 class _CallableOrNone:
@@ -26,22 +26,22 @@ def test_cmd_error(dvc):
     err = "sed: expression #1, char 2: extra characters after command"
 
     with mock.patch.object(
-        BaseFileSystem,
+        FileSystem,
         "remove",
         side_effect=RemoteCmdError("base", cmd, ret, err),
     ):
         with pytest.raises(RemoteCmdError):
-            BaseFileSystem(**config).remove("file")
+            FileSystem(**config).remove("file")
 
 
-@mock.patch.object(ObjectDB, "list_hashes_traverse")
+@mock.patch.object(ObjectDB, "_list_hashes_traverse")
 @mock.patch.object(ObjectDB, "list_hashes_exists")
 def test_hashes_exist(object_exists, traverse, dvc):
-    odb = ObjectDB(BaseFileSystem(), None)
+    odb = ObjectDB(FileSystem(), None)
 
     # remote does not support traverse
     odb.fs.CAN_TRAVERSE = False
-    with mock.patch.object(odb, "list_hashes", return_value=list(range(256))):
+    with mock.patch.object(odb, "_list_hashes", return_value=list(range(256))):
         hashes = set(range(1000))
         odb.hashes_exist(hashes)
         object_exists.assert_called_with(hashes, None, None)
@@ -52,7 +52,7 @@ def test_hashes_exist(object_exists, traverse, dvc):
     # large remote, small local
     object_exists.reset_mock()
     traverse.reset_mock()
-    with mock.patch.object(odb, "list_hashes", return_value=list(range(256))):
+    with mock.patch.object(odb, "_list_hashes", return_value=list(range(256))):
         hashes = list(range(1000))
         odb.hashes_exist(hashes)
         # verify that _odb_paths_with_max() short circuits
@@ -71,7 +71,7 @@ def test_hashes_exist(object_exists, traverse, dvc):
     object_exists.reset_mock()
     traverse.reset_mock()
     odb.fs._JOBS = 16
-    with mock.patch.object(odb, "list_hashes", return_value=list(range(256))):
+    with mock.patch.object(odb, "_list_hashes", return_value=list(range(256))):
         hashes = list(range(1000000))
         odb.hashes_exist(hashes)
         object_exists.assert_not_called()
@@ -83,15 +83,15 @@ def test_hashes_exist(object_exists, traverse, dvc):
         )
 
 
-@mock.patch.object(ObjectDB, "list_hashes", return_value=[])
+@mock.patch.object(ObjectDB, "_list_hashes", return_value=[])
 @mock.patch.object(ObjectDB, "_path_to_hash", side_effect=lambda x: x)
 def test_list_hashes_traverse(_path_to_hash, list_hashes, dvc):
-    odb = ObjectDB(BaseFileSystem(), None)
-    odb.path_info = PathInfo("foo")
+    odb = ObjectDB(FileSystem(), None)
+    odb.fs_path = "foo"
 
     # parallel traverse
     size = 256 / odb.fs._JOBS * odb.fs.LIST_OBJECT_PAGE_SIZE
-    list(odb.list_hashes_traverse(size, {0}))
+    list(odb._list_hashes_traverse(size, {0}))
     for i in range(1, 16):
         list_hashes.assert_any_call(
             prefix=f"{i:03x}", progress_callback=CallableOrNone
@@ -104,40 +104,34 @@ def test_list_hashes_traverse(_path_to_hash, list_hashes, dvc):
     # default traverse (small remote)
     size -= 1
     list_hashes.reset_mock()
-    list(odb.list_hashes_traverse(size - 1, {0}))
+    list(odb._list_hashes_traverse(size - 1, {0}))
     list_hashes.assert_called_with(
         prefix=None, progress_callback=CallableOrNone
     )
 
 
 def test_list_hashes(dvc):
-    odb = ObjectDB(BaseFileSystem(), None)
-    odb.path_info = PathInfo("foo")
+    odb = ObjectDB(FileSystem(), None)
+    odb.fs_path = "foo"
 
     with mock.patch.object(
         odb, "_list_paths", return_value=["12/3456", "bar"]
     ):
-        hashes = list(odb.list_hashes())
+        hashes = list(odb._list_hashes())
         assert hashes == ["123456"]
 
 
 def test_list_paths(dvc):
-    path_info = PathInfo("foo")
-    odb = ObjectDB(BaseFileSystem(), path_info)
+    path = "foo"
+    odb = ObjectDB(FileSystem(), path)
 
-    with mock.patch.object(odb.fs, "walk_files", return_value=[]) as walk_mock:
+    with mock.patch.object(odb.fs, "find", return_value=[]) as walk_mock:
         for _ in odb._list_paths():
             pass
-        walk_mock.assert_called_with(path_info, prefix=False)
+        walk_mock.assert_called_with(path, prefix=False)
 
         for _ in odb._list_paths(prefix="000"):
             pass
-        walk_mock.assert_called_with(path_info / "00" / "0", prefix=True)
-
-
-@pytest.mark.parametrize(
-    "hash_, result",
-    [(None, False), ("", False), ("3456.dir", True), ("3456", False)],
-)
-def test_is_dir_hash(hash_, result):
-    assert BaseFileSystem.is_dir_hash(hash_) == result
+        walk_mock.assert_called_with(
+            posixpath.join(path, "00", "0"), prefix=True
+        )

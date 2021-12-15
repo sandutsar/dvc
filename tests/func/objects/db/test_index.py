@@ -16,7 +16,7 @@ def index(dvc, local_remote, mocker):
 def test_indexed_on_status(tmp_dir, dvc, index):
     foo = tmp_dir.dvc_gen({"foo": "foo content"})[0].outs[0]
     bar = tmp_dir.dvc_gen({"bar": {"baz": "baz content"}})[0].outs[0]
-    baz_hash = bar.obj.trie.get(("baz",)).hash_info
+    baz_hash = bar.obj.trie.get(("baz",))[1]
     clean_staging()
     dvc.push()
     index.clear()
@@ -30,7 +30,7 @@ def test_indexed_on_status(tmp_dir, dvc, index):
 def test_indexed_on_push(tmp_dir, dvc, index):
     foo = tmp_dir.dvc_gen({"foo": "foo content"})[0].outs[0]
     bar = tmp_dir.dvc_gen({"bar": {"baz": "baz content"}})[0].outs[0]
-    baz_hash = bar.obj.trie.get(("baz",)).hash_info
+    baz_hash = bar.obj.trie.get(("baz",))[1]
     clean_staging()
 
     dvc.push()
@@ -60,13 +60,13 @@ def test_clear_on_download_err(tmp_dir, dvc, index, mocker):
     out = tmp_dir.dvc_gen({"dir": {"foo": "foo content"}})[0].outs[0]
     dvc.push()
 
-    for _, entry in out.obj:
-        remove(dvc.odb.local.get(entry.hash_info).path_info)
-    remove(out.path_info)
+    for _, _, oid in out.obj:
+        remove(dvc.odb.local.get(oid).fs_path)
+    remove(out.fs_path)
 
     assert list(index.hashes())
 
-    mocker.patch("dvc.fs.local.LocalFileSystem.upload", side_effect=Exception)
+    mocker.patch("dvc.fs.utils.transfer", side_effect=Exception)
     with pytest.raises(DownloadError):
         dvc.pull()
     assert not list(index.hashes())
@@ -83,7 +83,7 @@ def test_partial_upload(tmp_dir, dvc, index, mocker):
             raise Exception("stop baz")
         return original(self, from_file, to_info, name, **kwargs)
 
-    mocker.patch.object(LocalFileSystem, "upload", unreliable_upload)
+    mocker.patch("dvc.fs.utils.transfer", unreliable_upload)
     with pytest.raises(UploadError):
         dvc.push()
     assert not list(index.hashes())

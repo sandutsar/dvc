@@ -1,12 +1,11 @@
 import os
 from unittest.mock import ANY, patch
 
+from scmrepo.git import Git
+
 from dvc.external_repo import CLONES, external_repo
-from dvc.fs.local import LocalFileSystem
 from dvc.objects.stage import stage
 from dvc.objects.transfer import transfer
-from dvc.path_info import PathInfo
-from dvc.scm.git import Git
 from dvc.utils import relpath
 from dvc.utils.fs import makedirs, remove
 from tests.unit.fs.test_repo import make_subrepo
@@ -48,12 +47,14 @@ def test_source_change(erepo_dir):
 
 
 def test_cache_reused(erepo_dir, mocker, local_cloud):
+    import dvc.fs.utils
+
     erepo_dir.add_remote(config=local_cloud.config)
     with erepo_dir.chdir():
         erepo_dir.dvc_gen("file", "text", commit="add file")
     erepo_dir.dvc.push()
 
-    download_spy = mocker.spy(LocalFileSystem, "upload")
+    download_spy = mocker.spy(dvc.fs.utils, "transfer")
 
     # Use URL to prevent any fishy optimizations
     url = f"file://{erepo_dir}"
@@ -95,7 +96,8 @@ def test_pull_subdir_file(tmp_dir, erepo_dir):
     dest = tmp_dir / "file"
     with external_repo(os.fspath(erepo_dir)) as repo:
         repo.repo_fs.download(
-            PathInfo(repo.root_dir) / "subdir" / "file", PathInfo(dest)
+            os.path.join(repo.root_dir, "subdir", "file"),
+            os.fspath(dest),
         )
 
     assert dest.is_file()
@@ -139,7 +141,9 @@ def test_shallow_clone_branch(erepo_dir):
             with repo.open_by_relpath("file") as fd:
                 assert fd.read() == "branch"
 
-        mock_clone.assert_called_with(url, ANY, shallow_branch="branch")
+        mock_clone.assert_called_with(
+            url, ANY, shallow_branch="branch", progress=ANY
+        )
         _, shallow = CLONES[url]
         assert shallow
 
@@ -165,7 +169,9 @@ def test_shallow_clone_tag(erepo_dir):
             with repo.open_by_relpath("file") as fd:
                 assert fd.read() == "foo"
 
-        mock_clone.assert_called_with(url, ANY, shallow_branch="v1")
+        mock_clone.assert_called_with(
+            url, ANY, shallow_branch="v1", progress=ANY
+        )
         _, shallow = CLONES[url]
         assert shallow
 
@@ -190,9 +196,8 @@ def test_subrepos_are_ignored(tmp_dir, erepo_dir):
 
     with external_repo(os.fspath(erepo_dir)) as repo:
         repo.repo_fs.download(
-            PathInfo(repo.root_dir) / "dir",
-            PathInfo(tmp_dir / "out"),
-            follow_subrepos=False,
+            os.path.join(repo.root_dir, "dir"),
+            os.fspath(tmp_dir / "out"),
         )
         expected_files = {"foo": "foo", "bar": "bar", ".gitignore": "/foo\n"}
         assert (tmp_dir / "out").read_text() == expected_files
@@ -203,9 +208,9 @@ def test_subrepos_are_ignored(tmp_dir, erepo_dir):
         clean_staging()
         makedirs(cache_dir)
 
-        staging, obj = stage(
+        staging, _, obj = stage(
             repo.odb.local,
-            PathInfo(repo.root_dir) / "dir",
+            os.path.join(repo.root_dir, "dir"),
             repo.repo_fs,
             "md5",
             dvcignore=repo.dvcignore,
@@ -215,7 +220,7 @@ def test_subrepos_are_ignored(tmp_dir, erepo_dir):
             repo.odb.local,
             {obj.hash_info},
             shallow=False,
-            move=True,
+            hardlink=True,
         )
         assert set(cache_dir.glob("??/*")) == {
             cache_dir / "e1" / "d9e8eae5374860ae025ec84cfd85c7.dir",
@@ -237,9 +242,8 @@ def test_subrepos_are_ignored_for_git_tracked_dirs(tmp_dir, erepo_dir):
 
     with external_repo(os.fspath(erepo_dir)) as repo:
         repo.repo_fs.download(
-            PathInfo(repo.root_dir) / "dir",
-            PathInfo(tmp_dir / "out"),
-            follow_subrepos=False,
+            os.path.join(repo.root_dir, "dir"),
+            os.fspath(tmp_dir / "out"),
         )
         # subrepo files should not be here
         assert (tmp_dir / "out").read_text() == scm_files

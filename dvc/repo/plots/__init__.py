@@ -3,12 +3,20 @@ import io
 import logging
 import os
 from collections import OrderedDict
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional
+from functools import partial
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Generator,
+    List,
+    Optional,
+)
 
 from funcy import cached_property, first, project
 
 from dvc.exceptions import DvcException
-from dvc.render.vega import PlotMetricTypeError
 from dvc.utils import (
     error_handler,
     errored_revisions,
@@ -22,6 +30,14 @@ if TYPE_CHECKING:
     from dvc.repo import Repo
 
 logger = logging.getLogger(__name__)
+
+
+class PlotMetricTypeError(DvcException):
+    def __init__(self, file):
+        super().__init__(
+            "'{}' - file type error\n"
+            "Only JSON, YAML, CSV and TSV formats are supported.".format(file)
+        )
 
 
 class NotAPlotError(DvcException):
@@ -47,10 +63,10 @@ class Plots:
         recursive: bool = False,
         onerror: Optional[Callable] = None,
         props: Optional[Dict] = None,
-    ) -> Dict[str, Dict]:
+    ) -> Generator[Dict, None, None]:
         """Collects all props and data for plots.
 
-        Returns a structure like:
+        Generator yielding a structure like:
             {rev: {plots.csv: {
                 props: {x: ..., "header": ..., ...},
                 data: "unstructured data (as stored for given extension)",
@@ -59,30 +75,20 @@ class Plots:
         from dvc.utils.collections import ensure_list
 
         targets = ensure_list(targets)
-        data: Dict[str, Dict] = {}
         for rev in self.repo.brancher(revs=revs):
             # .brancher() adds unwanted workspace
             if revs is not None and rev not in revs:
                 continue
             rev = rev or "workspace"
-            data[rev] = self._collect_from_revision(
-                revision=rev,
-                targets=targets,
-                recursive=recursive,
-                onerror=onerror,
-                props=props,
-            )
-
-        errored = errored_revisions(data)
-        if errored:
-            from dvc.ui import ui
-
-            ui.error_write(
-                "DVC failed to load some plots for following revisions: "
-                f"'{', '.join(errored)}'."
-            )
-
-        return data
+            yield {
+                rev: self._collect_from_revision(
+                    revision=rev,
+                    targets=targets,
+                    recursive=recursive,
+                    onerror=onerror,
+                    props=props,
+                )
+            }
 
     @error_handler
     def _collect_from_revision(
@@ -97,17 +103,14 @@ class Plots:
 
         fs = RepoFileSystem(self.repo)
         plots = _collect_plots(self.repo, targets, revision, recursive)
-        res = {}
-        for path_info, rev_props in plots.items():
-
-            if fs.isdir(path_info):
+        res: Dict[str, Any] = {}
+        for fs_path, rev_props in plots.items():
+            if fs.isdir(fs_path):
                 plot_files = []
-                for pi in fs.walk_files(path_info):
+                for pi in fs.find(fs_path):
                     plot_files.append((pi, relpath(pi, self.repo.root_dir)))
             else:
-                plot_files = [
-                    (path_info, relpath(path_info, self.repo.root_dir))
-                ]
+                plot_files = [(fs_path, relpath(fs_path, self.repo.root_dir))]
 
             props = props or {}
 
@@ -115,12 +118,15 @@ class Plots:
                 joined_props = {**rev_props, **props}
                 res[repo_path] = {"props": joined_props}
                 res[repo_path].update(
-                    parse(
-                        fs,
-                        path,
-                        props=joined_props,
-                        onerror=onerror,
-                    )
+                    {
+                        "data_source": partial(
+                            parse,
+                            fs,
+                            path,
+                            props=joined_props,
+                            onerror=onerror,
+                        )
+                    }
                 )
         return res
 
@@ -135,9 +141,29 @@ class Plots:
         if onerror is None:
             onerror = onerror_collect
 
-        return self.collect(
+        result: Dict[str, Dict] = {}
+        for data in self.collect(
             targets, revs, recursive, onerror=onerror, props=props
-        )
+        ):
+            assert len(data) == 1
+            revision_data = first(data.values())
+            if "data" in revision_data:
+                for path_data in revision_data["data"].values():
+                    result_source = path_data.pop("data_source", None)
+                    if result_source:
+                        path_data.update(result_source())
+            result.update(data)
+
+        errored = errored_revisions(result)
+        if errored:
+            from dvc.ui import ui
+
+            ui.error_write(
+                "DVC failed to load some plots for following revisions: "
+                f"'{', '.join(errored)}'."
+            )
+
+        return result
 
     def diff(self, *args, **kwargs):
         from .diff import diff
@@ -201,10 +227,10 @@ def _collect_plots(
     targets: List[str] = None,
     rev: str = None,
     recursive: bool = False,
-) -> Dict[str, Dict]:
+) -> Dict["List[str]", Dict]:
     from dvc.repo.collect import collect
 
-    plots, path_infos = collect(
+    plots, fs_paths = collect(
         repo,
         output_filter=_is_plot,
         targets=targets,
@@ -212,8 +238,8 @@ def _collect_plots(
         recursive=recursive,
     )
 
-    result = {plot.path_info: _plot_props(plot) for plot in plots}
-    result.update({path_info: {} for path_info in path_infos})
+    result = {plot.fs_path: _plot_props(plot) for plot in plots}
+    result.update({fs_path: {} for fs_path in fs_paths})
     return result
 
 

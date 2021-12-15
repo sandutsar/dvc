@@ -1,3 +1,4 @@
+import logging
 import os
 from collections import defaultdict
 
@@ -9,6 +10,8 @@ from dvc.hash_info import HashInfo
 from dvc.utils.serialize import LOADERS, ParseError
 
 from .base import Dependency
+
+logger = logging.getLogger(__name__)
 
 
 class MissingParamsError(DvcException):
@@ -89,10 +92,10 @@ class ParamsDependency(Dependency):
         if not self.exists:
             return {}
 
-        suffix = self.path_info.suffix.lower()
+        suffix = self.repo.fs.path.suffix(self.fs_path).lower()
         loader = LOADERS[suffix]
         try:
-            return loader(self.path_info, fs=self.repo.fs)
+            return loader(self.fs_path, fs=self.repo.fs)
         except ParseError as exc:
             raise BadParamFileError(
                 f"Unable to read parameters from '{self}'"
@@ -133,3 +136,20 @@ class ParamsDependency(Dependency):
             )
 
         return HashInfo(self.PARAM_PARAMS, info)
+
+    def save(self):
+        if not self.exists:
+            raise self.DoesNotExistError(self)
+
+        if not self.isfile and not self.isdir:
+            raise self.IsNotFileOrDirError(self)
+
+        if self.is_empty:
+            logger.warning(f"'{self}' is empty.")
+
+        self.ignore()
+
+        if self.metric or self.plot:
+            self.verify_metric()
+
+        self.hash_info = self.get_hash()

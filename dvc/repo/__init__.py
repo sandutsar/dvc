@@ -11,15 +11,14 @@ from dvc.exceptions import FileMissingError
 from dvc.exceptions import IsADirectoryError as DvcIsADirectoryError
 from dvc.exceptions import NotDvcRepoError, OutputNotFoundError
 from dvc.ignore import DvcIgnoreFilter
-from dvc.path_info import PathInfo
 from dvc.utils import env2bool
 from dvc.utils.fs import path_isin
 
 if TYPE_CHECKING:
-    from dvc.fs.base import BaseFileSystem
+    from dvc.fs.base import FileSystem
     from dvc.objects.file import HashFile
+    from dvc.repo.scm_context import SCMContext
     from dvc.scm import Base
-
 
 logger = logging.getLogger(__name__)
 
@@ -91,15 +90,18 @@ class Repo:
     ):
         assert bool(scm) == bool(rev)
 
-        from dvc.scm import SCM
-        from dvc.scm.base import SCMError
-        from dvc.scm.git import Git
+        from dvc.fs.git import GitFileSystem
+        from dvc.scm import SCM, Base, Git, SCMError
         from dvc.utils.fs import makedirs
 
         dvc_dir = None
         tmp_dir = None
         try:
-            fs = scm.get_fs(rev) if isinstance(scm, Git) and rev else None
+            fs = (
+                GitFileSystem(scm=scm, rev=rev)
+                if isinstance(scm, Git) and rev
+                else None
+            )
             root_dir = self.find_root(root_dir, fs)
             dvc_dir = os.path.join(root_dir, self.DVC_DIR)
             tmp_dir = os.path.join(dvc_dir, "tmp")
@@ -112,8 +114,6 @@ class Repo:
                 scm = SCM(root_dir or os.curdir)
             except SCMError:
                 scm = SCM(os.curdir, no_scm=True)
-
-            from dvc.scm import Base
 
             assert isinstance(scm, Base)
             root_dir = scm.root_dir
@@ -161,16 +161,16 @@ class Repo:
     ):
         from dvc.config import Config
         from dvc.data_cloud import DataCloud
+        from dvc.fs.git import GitFileSystem
         from dvc.fs.local import LocalFileSystem
         from dvc.lock import LockNoop, make_lock
-        from dvc.machine import MachineManager
         from dvc.objects.db import ODBManager
         from dvc.repo.live import Live
         from dvc.repo.metrics import Metrics
         from dvc.repo.params import Params
         from dvc.repo.plots import Plots
         from dvc.repo.stage import StageLoad
-        from dvc.scm import SCM
+        from dvc.scm import SCM, Git
         from dvc.stage.cache import StageCache
         from dvc.state import State, StateNoop
 
@@ -185,7 +185,8 @@ class Repo:
         )
 
         if scm:
-            self._fs = scm.get_fs(rev)
+            assert isinstance(scm, Git)
+            self._fs = GitFileSystem(scm=scm, rev=rev)
         else:
             self._fs = LocalFileSystem(url=self.root_dir)
 
@@ -224,14 +225,6 @@ class Repo:
         self.params = Params(self)
         self.live = Live(self)
 
-        if self.tmp_dir and (
-            self.config["feature"].get("machine", False)
-            or env2bool("DVC_TEST")
-        ):
-            self.machine = MachineManager(self)
-        else:
-            self.machine = None
-
         self.stage_collection_error_handler: Optional[
             Callable[[str, Exception], None]
         ] = None
@@ -263,8 +256,7 @@ class Repo:
 
     @cached_property
     def scm(self):
-        from dvc.scm import SCM
-        from dvc.scm.base import SCMError
+        from dvc.scm import SCM, SCMError
 
         if self._scm:
             return self._scm
@@ -280,6 +272,12 @@ class Repo:
             raise
 
     @cached_property
+    def scm_context(self) -> "SCMContext":
+        from dvc.repo.scm_context import SCMContext
+
+        return SCMContext(self.scm, self.config)
+
+    @cached_property
     def dvcignore(self) -> DvcIgnoreFilter:
 
         return DvcIgnoreFilter(self.fs, self.root_dir)
@@ -289,7 +287,10 @@ class Repo:
 
         assert self.scm
         if isinstance(self.fs, LocalFileSystem):
-            return self.scm.get_rev()
+            from dvc.scm import map_scm_exception
+
+            with map_scm_exception():
+                return self.scm.get_rev()
         return self.fs.rev
 
     @cached_property
@@ -298,12 +299,23 @@ class Repo:
 
         return Experiments(self)
 
+    @cached_property
+    def machine(self):
+        from dvc.machine import MachineManager
+
+        if self.tmp_dir and (
+            self.config["feature"].get("machine", False)
+            or env2bool("DVC_TEST")
+        ):
+            return MachineManager(self)
+        return None
+
     @property
-    def fs(self) -> "BaseFileSystem":
+    def fs(self) -> "FileSystem":
         return self._fs
 
     @fs.setter
-    def fs(self, fs: "BaseFileSystem"):
+    def fs(self, fs: "FileSystem"):
         self._fs = fs
         # Our graph cache is no longer valid, as it was based on the previous
         # fs.
@@ -352,7 +364,7 @@ class Repo:
         )
 
     def unprotect(self, target):
-        return self.odb.local.unprotect(PathInfo(target))
+        return self.odb.local.unprotect(target)
 
     def _ignore(self):
         flist = [self.config.files["local"], self.tmp_dir]
@@ -360,7 +372,8 @@ class Repo:
         if path_isin(self.odb.local.cache_dir, self.root_dir):
             flist += [self.odb.local.cache_dir]
 
-        self.scm.ignore_list(flist)
+        for file in flist:
+            self.scm_context.ignore(file)
 
     def brancher(self, *args, **kwargs):
         from dvc.repo.brancher import brancher
@@ -444,14 +457,18 @@ class Repo:
         outs = outs or self.index.outs_graph
 
         abs_path = os.path.abspath(path)
-        path_info = PathInfo(abs_path)
-        match = path_info.__eq__ if strict else path_info.isin_or_eq
+        fs_path = abs_path
 
         def func(out):
-            if out.scheme == "local" and match(out.path_info):
+            def eq(one, two):
+                return one == two
+
+            match = eq if strict else out.fs.path.isin_or_eq
+
+            if out.scheme == "local" and match(fs_path, out.fs_path):
                 return True
 
-            if recursive and out.path_info.isin(path_info):
+            if recursive and out.fs.path.isin(out.fs_path, fs_path):
                 return True
 
             return False
@@ -488,7 +505,7 @@ class Repo:
         from dvc.fs.repo import RepoFileSystem
 
         fs = RepoFileSystem(self, subrepos=True)
-        path = PathInfo(self.root_dir) / path
+        path = self.fs.path.join(self.root_dir, path)
         try:
             with fs.open(
                 path, mode=mode, encoding=encoding, remote=remote
